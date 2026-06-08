@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bittensor 套利抢跑机器人控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Background effects -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <!-- Login Overlay -->
+  <div id="login-overlay" class="overlay active">
+    <div class="login-card glass">
+      <h2>🤖 机器人控制台登录</h2>
+      <p class="subtitle">请输入管理员账号和密码以进入控制面板</p>
+      <div id="login-error" class="error-msg"></div>
+      <form id="login-form">
+        <div class="form-group">
+          <label for="username">管理员账号</label>
+          <input type="text" id="username" required placeholder="请输入用户名">
+        </div>
+        <div class="form-group">
+          <label for="password">管理员密码</label>
+          <input type="password" id="password" required placeholder="请输入密码">
+        </div>
+        <button type="submit" class="btn btn-primary btn-block">立即登录</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- App Wrapper -->
+  <div id="app" class="app-container">
+    <!-- Top Header -->
+    <header class="app-header glass">
+      <div class="brand">
+        <span class="logo">🤖</span>
+        <div class="brand-text">
+          <h1>Bittensor Sniper</h1>
+          <p>套利抢跑控制台 v1.0</p>
+        </div>
+      </div>
+      
+      <!-- Stats Summary -->
+      <div class="header-stats">
+        <div class="stat-box">
+          <span class="stat-label">北京时间 (UTC+8)</span>
+          <span class="stat-value text-glowing" id="clock-beijing">0000-00-00 00:00:00</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">当前区块高度</span>
+          <span class="stat-value" id="header-block">--</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">系统运行时间</span>
+          <span class="stat-value" id="header-uptime">00:00:00</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">API 延迟</span>
+          <span class="stat-value" id="header-latency">--</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">机器人状态</span>
+          <span class="badge" id="header-status">Checking</span>
+        </div>
+      </div>
+
+      <div class="user-actions">
+        <button id="btn-logout" class="btn btn-secondary">注销</button>
+      </div>
+    </header>
+
+    <!-- Main Content Layout -->
+    <div class="main-layout">
+      <!-- Sidebar Navigation -->
+      <aside class="sidebar glass">
+        <nav class="side-nav">
+          <a href="#" class="nav-item active" data-tab="dashboard">
+            <span class="icon">📊</span> 运行概览
+          </a>
+          <a href="#" class="nav-item" data-tab="wallets">
+            <span class="icon">💰</span> 小号钱包
+          </a>
+          <a href="#" class="nav-item" data-tab="strategies">
+            <span class="icon">🎯</span> 抢跑策略
+          </a>
+          <a href="#" class="nav-item" data-tab="settings">
+            <span class="icon">⚙️</span> 系统设置
+          </a>
+        </nav>
+        
+        <div class="sidebar-footer">
+          <p>节点连接: <span id="sidebar-node">未连接</span></p>
+        </div>
+      </aside>
+
+      <!-- Tab Content Area -->
+      <main class="content-area">
+        
+        <!-- Tab: Dashboard -->
+        <section id="tab-dashboard" class="tab-panel active">
+          <div class="dashboard-grid">
+            <!-- Bot Control Card -->
+            <div class="card glass c-span-12">
+              <div class="bot-control-header">
+                <div>
+                  <h3>🤖 套利机器人主开关</h3>
+                  <p class="card-desc">当开关关闭时，机器人将暂停所有对交易池的解析和套利交易，但网页端仍会继续同步区块和延迟信息。</p>
+                </div>
+                <div class="control-actions">
+                  <button id="btn-bot-start" class="btn btn-success">启动运行</button>
+                  <button id="btn-bot-stop" class="btn btn-danger">停止运行</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Multi-Node Network Status Card -->
+            <div class="card glass c-span-12">
+              <div class="card-header">
+                <h3>🌐 多节点广播状态 (Multi-Node Network Status)</h3>
+              </div>
+              <p class="card-desc" style="margin-bottom: 12px;">展示已连接的多节点并发广播池，当套利机会触发时，机器人将同时向以下所有就绪节点广播已签名 extrinsic，极大降低单点网络延迟。</p>
+              <div class="table-responsive">
+                <table class="status-table">
+                  <thead>
+                    <tr>
+                      <th>节点地址 (WebSocket URL)</th>
+                      <th>连接状态</th>
+                      <th>网络延迟 (RTT)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="broadcast-nodes-list">
+                    <tr>
+                      <td colspan="3" class="text-center" style="color: var(--text-muted); padding: 20px;">暂无广播节点，请在系统设置中配置。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <!-- Logs Card -->
+            <div class="card glass c-span-12">
+              <div class="card-header">
+                <h3>📜 实时系统日志流 (北京时间)</h3>
+                <div class="log-actions">
+                  <button id="btn-clear-logs" class="btn btn-secondary btn-sm">清除日志</button>
+                </div>
+              </div>
+              <div class="console-wrapper">
+                <div id="logs-console" class="console">
+                  <div class="log-line system">等待建立 WebSocket 日志连接...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab: Wallets -->
+        <section id="tab-wallets" class="tab-panel">
+          <div class="card glass">
+            <div class="card-header">
+              <h3>💰 小号钱包列表</h3>
+              <button id="btn-refresh-balances" class="btn btn-secondary">一键刷新余额</button>
+            </div>
+            <p class="card-desc">下面是当前已加载的用于打新和抢跑的小号钱包。交易时机器人会批量或并行调用这些钱包以提高抢中率。</p>
+            
+            <div class="wallets-grid" id="wallets-list">
+              <div class="no-wallets">暂无钱包，请在下方导入！</div>
+            </div>
+
+            <div class="wallet-form-section">
+              <h4>🔑 导入新小号钱包 (Option B)</h4>
+              <p class="card-desc text-danger">注意：输入的助记词或私钥将在服务器端通过 AES-256 加密保存。请务必妥善保管密码。</p>
+              <div id="wallet-error" class="error-msg"></div>
+              <form id="wallet-form" class="inline-form">
+                <div class="form-group">
+                  <label>钱包别名</label>
+                  <input type="text" id="wallet-name" required placeholder="如: 小号01">
+                </div>
+                <div class="form-group">
+                  <label>密钥类型</label>
+                  <select id="wallet-type">
+                    <option value="mnemonic">助记词 (12位/24位)</option>
+                    <option value="seed">十六进制私钥/种子</option>
+                  </select>
+                </div>
+                <div class="form-group f-grow-2">
+                  <label>密钥内容</label>
+                  <input type="password" id="wallet-secret" required placeholder="输入助记词或十六进制私钥">
+                </div>
+                <div class="form-group submit-group">
+                  <label>&nbsp;</label>
+                  <button type="submit" class="btn btn-primary">确认导入</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab: Strategies -->
+        <section id="tab-strategies" class="tab-panel">
+          <!-- Strategy 1: Subnet Dashing -->
+          <div class="card glass strategy-card">
+            <div class="strategy-header">
+              <div class="strategy-title">
+                <h3>🚀 策略 1: 新子网外部 Staking 抢购 (Staking Sniping)</h3>
+                <p class="card-desc">当监控到他人成功注册新子网时，立刻预测新子 netuid 并提取其交易中的 hotkey，于新区块头到达的第 0 毫秒（不等事件查询）并行发起多笔抢购 addStakeLimit 交易，买入最低价 Alpha 份额。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="strat-dashing-enabled">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="strategy-settings inline-settings">
+              <div class="setting-item">
+                <label>打新金额 (TAO)</label>
+                <input type="number" id="strat-dashing-amount" step="1" min="1">
+              </div>
+              <div class="setting-item">
+                <label>打新并发笔数 (Burst Count)</label>
+                <input type="number" id="strat-dashing-burst" min="1" max="10" placeholder="例如: 1">
+              </div>
+              <div class="setting-item">
+                <label>重试次数</label>
+                <input type="number" id="strat-dashing-retries" min="1" max="100">
+              </div>
+              <div class="setting-item">
+                <label>重试间隔 (ms)</label>
+                <input type="number" id="strat-dashing-interval" min="50">
+              </div>
+              <div class="setting-item">
+                <label>交易超时时间 (ms)</label>
+                <input type="number" id="strat-dashing-timeout" min="1000">
+              </div>
+              <div class="setting-item">
+                <label>抢跑小费/优先费 (TAO)</label>
+                <input type="number" id="strat-dashing-tip" step="0.1" min="0">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (Slippage Limit)</label>
+                <input type="number" id="strat-dashing-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.10">
+              </div>
+            </div>
+          </div>
+
+          <!-- Strategy 2: Subnet Rename -->
+          <div class="card glass strategy-card">
+            <div class="strategy-header">
+              <div class="strategy-title">
+                <h3>🎯 策略 2: 子网改名抢跑 (Rename Frontrun)</h3>
+                <p class="card-desc">监听到子网改名非默认占位符名称（如 setSubnetIdentity）时，立刻代表小号钱包前抢买入锁定份额。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="strat-rename-enabled">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="strategy-settings inline-settings">
+              <div class="setting-item">
+                <label>改名抢跑小费/优先费 (TAO)</label>
+                <input type="number" id="strat-rename-tip" step="0.1" min="0">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (Slippage Limit)</label>
+                <input type="number" id="strat-rename-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
+              </div>
+            </div>
+          </div>
+
+          <!-- Strategy 3: Coldkey Swap -->
+          <div class="card glass strategy-card">
+            <div class="strategy-header">
+              <div class="strategy-title">
+                <h3>🔒 策略 3: 冷键交换声明/执行抢跑 (Swap Frontrun)</h3>
+                <p class="card-desc">监听到子网所属冷键提交 `announceColdkeySwap` 或 `swapColdkey` 时，立即匹配该冷键下属子网自动执行抢买。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="strat-swap-enabled">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="strategy-settings inline-settings">
+              <div class="setting-item">
+                <label>交换抢跑小费/优先费 (TAO)</label>
+                <input type="number" id="strat-swap-tip" step="0.1" min="0">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (Slippage Limit)</label>
+                <input type="number" id="strat-swap-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
+              </div>
+            </div>
+          </div>
+
+          <!-- Strategy 4: Sandwich Arbitrage -->
+          <div class="card glass strategy-card">
+            <div class="strategy-header">
+              <div class="strategy-title">
+                <h3>🥪 策略 4: 大额买入三明治套利 (Sandwich Arbitrage - 方案B)</h3>
+                <p class="card-desc">全自动闭环套利：在交易池监测到用户买入大于阈值的交易时，发起更高优先小费（Frontrun Tip）强行在该买入前加仓，并在紧随其后的新区块自动抛出回补（Backrun Tip）锁定利润。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="strat-sandwich-enabled">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="strategy-settings inline-settings">
+              <div class="setting-item">
+                <label>大额买入触发阈值 (TAO)</label>
+                <input type="number" id="strat-sandwich-threshold" step="10" min="1">
+              </div>
+              <div class="setting-item">
+                <label>前置买入小费 (TAO)</label>
+                <input type="number" id="strat-sandwich-tip" step="0.5" min="0">
+              </div>
+              <div class="setting-item">
+                <label>后置卖出小费 (TAO)</label>
+                <input type="number" id="strat-sandwich-sell-tip" step="0.01" min="0">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (Slippage Limit)</label>
+                <input type="number" id="strat-sandwich-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
+              </div>
+              <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="strat-sandwich-autosell">
+                  <span class="checkmark"></span> 对方成交后自动后置抛售回补
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- Advanced Bidding & Limit Controls -->
+          <div class="card glass strategy-card">
+            <div class="strategy-header">
+              <div class="strategy-title">
+                <h3>⚡ 高级竞价、交易加速与动态滑点设置 (Advanced Bidding, RBF & Slippage)</h3>
+                <p class="card-desc">配置动态小费出价、限价单的部分成交行为、RBF 交易加速重发，以及 AMM 动态滑点计算。</p>
+              </div>
+            </div>
+            <div class="strategy-settings inline-settings">
+              <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="cfg-dynamic-tip-enabled">
+                  <span class="checkmark"></span> 启用动态小费竞价 (根据 Mempool 竞争对手自动上调)
+                </label>
+              </div>
+              <div class="setting-item">
+                <label>竞价上浮步长 (TAO)</label>
+                <input type="number" id="cfg-dynamic-tip-delta" step="0.01" min="0.01" placeholder="例如: 0.1">
+              </div>
+              <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="cfg-allow-partial-staking">
+                  <span class="checkmark"></span> 允许限价单部分成交 (Allow Partial Fill)
+                </label>
+              </div>
+              <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="cfg-rbf-enabled">
+                  <span class="checkmark"></span> 启用 RBF 交易加速 (检测到被抢跑时自动以高小费加速重发)
+                </label>
+              </div>
+              <div class="setting-item">
+                <label>加速上浮步长 (TAO)</label>
+                <input type="number" id="cfg-rbf-delta" step="0.01" min="0.01" placeholder="例如: 0.1">
+              </div>
+              <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="cfg-dynamic-slippage-enabled">
+                  <span class="checkmark"></span> 启用 AMM 动态滑点 (基于恒定乘积公式与池大小计算)
+                </label>
+              </div>
+              <div class="setting-item">
+                <label>动态滑点安全因子</label>
+                <input type="number" id="cfg-dynamic-slippage-safety-factor" step="0.05" min="0.1" max="2.0" placeholder="例如: 0.7">
+              </div>
+            </div>
+          </div>
+
+          <div class="save-bar">
+            <button id="btn-save-strategies" class="btn btn-primary">保存策略配置</button>
+          </div>
+        </section>
+
+        <!-- Tab: Settings -->
+        <section id="tab-settings" class="tab-panel">
+          <div class="card glass">
+            <h3>⚙️ 系统综合设置</h3>
+            <p class="card-desc">配置机器人连接节点、Telegram 警报推送，以及管理端安全凭证。</p>
+            
+            <div id="settings-success" class="success-msg">配置保存成功！</div>
+            <div id="settings-error" class="error-msg"></div>
+
+            <form id="settings-form">
+              <div class="settings-section">
+                <h4>🔗 Subtensor API 节点配置</h4>
+                <div class="settings-grid">
+                  <div class="form-group c-span-6">
+                    <label>主节点 WS 地址 (如本地节点)</label>
+                    <div class="input-with-action">
+                      <input type="text" id="cfg-primary-node" required>
+                      <button type="button" id="btn-test-primary" class="btn btn-secondary">测速</button>
+                    </div>
+                    <span id="test-primary-res" class="test-result"></span>
+                  </div>
+                  <div class="form-group c-span-6">
+                    <label>备用节点 WS 地址 (如公共节点)</label>
+                    <div class="input-with-action">
+                      <input type="text" id="cfg-backup-node" required>
+                      <button type="button" id="btn-test-backup" class="btn btn-secondary">测速</button>
+                    </div>
+                    <span id="test-backup-res" class="test-result"></span>
+                  </div>
+                  <div class="form-group c-span-4">
+                    <label>每秒请求频率限制 (RPS)</label>
+                    <input type="number" id="cfg-rate-limit" min="1" max="100">
+                  </div>
+                  <div class="form-group c-span-12">
+                    <label>多节点并发广播地址 (每行一个 WebSocket URL)</label>
+                    <textarea id="cfg-broadcast-nodes" rows="3" placeholder="例如:&#10;wss://entrypoint-finney.opentensor.ai:443&#10;wss://archival.finney.opentensor.ai:443"></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section">
+                <h4>✈️ Telegram 机器人报警推送</h4>
+                <div class="settings-grid">
+                  <div class="form-group c-span-12">
+                    <label class="checkbox-container">
+                      <input type="checkbox" id="cfg-tg-enabled">
+                      <span class="checkmark"></span> 启用 Telegram 异常与打新成功通知
+                    </label>
+                  </div>
+                  <div class="form-group c-span-6">
+                    <label>TG Bot Token</label>
+                    <input type="password" id="cfg-tg-token" placeholder="输入 Telegram Bot Token">
+                  </div>
+                  <div class="form-group c-span-6">
+                    <label>TG Chat ID</label>
+                    <input type="text" id="cfg-tg-chatid" placeholder="输入接收警报的 Chat ID">
+                  </div>
+                  <div class="form-group c-span-12">
+                    <button type="button" id="btn-test-tg" class="btn btn-secondary">发送测试通知并检测延迟</button>
+                    <span id="test-tg-res" class="test-result"></span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section">
+                <h4>🔒 管理端端口与安全验证（修改后需重启）</h4>
+                <div class="settings-grid">
+                  <div class="form-group c-span-4">
+                    <label>控制台运行端口</label>
+                    <input type="number" id="cfg-web-port" required min="80" max="65535">
+                  </div>
+                  <div class="form-group c-span-4">
+                    <label>管理员账号</label>
+                    <input type="text" id="cfg-web-user" required>
+                  </div>
+                  <div class="form-group c-span-4">
+                    <label>新密码 (留空则不修改)</label>
+                    <input type="password" id="cfg-web-pass" placeholder="输入新密码">
+                  </div>
+                </div>
+              </div>
+
+              <div class="save-bar">
+                <button type="submit" class="btn btn-primary">保存系统设置</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+      </main>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
