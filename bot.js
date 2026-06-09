@@ -36,6 +36,7 @@ const activeSnipesByNetuid = new Set(); // added to prevent concurrent duplicate
 const subnetOwnersCache = new Map();
 const subnetHotkeysCache = new Map();
 const subnetRegisteredAtCache = new Map();
+let successfulSyncCount = 0;
 
 // RBF & Multi-Node Broadcast State
 const activePendingTxs = new Map(); // nonceKey -> pending details
@@ -208,6 +209,45 @@ async function refreshSubnetOwnersCache() {
       api.query.subtensorModule.networkRegisteredAt.multi(activeNetuids)
     ]);
     
+    const changes = [];
+    const isFirstSync = subnetOwnersCache.size === 0;
+
+    if (!isFirstSync) {
+      // 1. 检测已有子网的属性变更或新增子网
+      for (let i = 0; i < activeNetuids.length; i++) {
+        const netuid = activeNetuids[i];
+        const ownerStr = owners[i]?.toString();
+        const hotkeyStr = ownerHotkeys[i]?.toString();
+        const registeredBlock = Number(registeredBlocks[i]?.toString() || 0);
+
+        const oldOwner = subnetOwnersCache.get(netuid);
+        const oldHotkey = subnetHotkeysCache.get(netuid);
+        const oldRegBlock = subnetRegisteredAtCache.get(netuid);
+
+        if (oldOwner === undefined) {
+          changes.push(`[子网变动] 检测到新子网上线：#${netuid} (Owner: ${ownerStr ? ownerStr.slice(0, 8) + '...' : '无'}, Hotkey: ${hotkeyStr ? hotkeyStr.slice(0, 8) + '...' : '无'}, 注册高度: ${registeredBlock})`);
+        } else {
+          if (ownerStr && oldOwner !== ownerStr) {
+            changes.push(`[子网变动] 子网 #${netuid} 所有者 (Coldkey) 发生变更：${oldOwner.slice(0, 8)}... -> ${ownerStr.slice(0, 8)}...`);
+          }
+          if (hotkeyStr && hotkeyStr.length >= 47 && oldHotkey !== hotkeyStr) {
+            changes.push(`[子网变动] 子网 #${netuid} 的 Hotkey 发生变更：${oldHotkey ? oldHotkey.slice(0, 8) + '...' : '无'} -> ${hotkeyStr.slice(0, 8)}...`);
+          }
+          if (registeredBlock > 0 && oldRegBlock !== registeredBlock) {
+            changes.push(`[子网变动] 子网 #${netuid} 注册高度发生变更：${oldRegBlock || 0} -> ${registeredBlock} (可能被接管/回收)`);
+          }
+        }
+      }
+
+      // 2. 检测子网下线
+      const newNetuidsSet = new Set(activeNetuids);
+      for (const oldNetuid of subnetOwnersCache.keys()) {
+        if (!newNetuidsSet.has(oldNetuid)) {
+          changes.push(`[子网变动] 子网 #${oldNetuid} 已下线/删除`);
+        }
+      }
+    }
+
     subnetOwnersCache.clear();
     subnetHotkeysCache.clear();
     subnetRegisteredAtCache.clear();
@@ -227,7 +267,21 @@ async function refreshSubnetOwnersCache() {
         subnetRegisteredAtCache.set(netuid, registeredBlock);
       }
     }
-    log('SUCCESS', `[缓存同步] 子网缓存同步成功。已缓存 ${activeNetuids.length} 个子网的 Owner 账户、Hotkey 及注册高度信息。`);
+
+    if (isFirstSync) {
+      log('SUCCESS', `[缓存同步] 子网缓存初始化成功。已缓存 ${activeNetuids.length} 个子网的 Owner 账户、Hotkey 及注册高度信息。`);
+    } else if (changes.length > 0) {
+      for (const msg of changes) {
+        log('SUCCESS', msg);
+      }
+      successfulSyncCount = 0; // 重置心跳计数
+    } else {
+      successfulSyncCount++;
+      if (successfulSyncCount >= 10) {
+        log('SUCCESS', `[缓存同步] 子网缓存运行正常（已连续 ${successfulSyncCount} 次同步无变化，心跳正常）。已缓存 ${activeNetuids.length} 个子网。`);
+        successfulSyncCount = 0;
+      }
+    }
   } catch (e) {
     log('WARN', `[缓存同步] 自动同步子网 Owner 缓存失败: ${e.message}`);
   }
