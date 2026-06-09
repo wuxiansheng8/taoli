@@ -273,14 +273,6 @@
                 <input type="number" id="strat-rename-amount" step="1" min="1">
               </div>
               <div class="setting-item">
-                <label>改名抢跑小费/优先费 (TAO)</label>
-                <input type="number" id="strat-rename-tip" step="0.1" min="0">
-              </div>
-              <div class="setting-item">
-                <label>允许的最大滑点 (Slippage Limit)</label>
-                <input type="number" id="strat-rename-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
-              </div>
-              <div class="setting-item">
                 <label>单轮并发笔数 (Burst Count)</label>
                 <input type="number" id="strat-rename-burst" min="1" max="10" placeholder="例如: 1">
               </div>
@@ -299,6 +291,14 @@
               <div class="setting-item">
                 <label>超时重试次数</label>
                 <input type="number" id="strat-rename-timeout-retries" min="0" max="100" placeholder="例如: 0">
+              </div>
+              <div class="setting-item">
+                <label>改名抢跑小费/优先费 (TAO)</label>
+                <input type="number" id="strat-rename-tip" step="0.1" min="0">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (Slippage Limit)</label>
+                <input type="number" id="strat-rename-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
               </div>
             </div>
           </div>
@@ -321,14 +321,6 @@
                 <input type="number" id="strat-swap-amount" step="1" min="1">
               </div>
               <div class="setting-item">
-                <label>交换抢跑小费/优先费 (TAO)</label>
-                <input type="number" id="strat-swap-tip" step="0.1" min="0">
-              </div>
-              <div class="setting-item">
-                <label>允许的最大滑点 (Slippage Limit)</label>
-                <input type="number" id="strat-swap-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
-              </div>
-              <div class="setting-item">
                 <label>单轮并发笔数 (Burst Count)</label>
                 <input type="number" id="strat-swap-burst" min="1" max="10" placeholder="例如: 1">
               </div>
@@ -348,6 +340,14 @@
                 <label>超时重试次数</label>
                 <input type="number" id="strat-swap-timeout-retries" min="0" max="100" placeholder="例如: 0">
               </div>
+              <div class="setting-item">
+                <label>交换抢跑小费/优先费 (TAO)</label>
+                <input type="number" id="strat-swap-tip" step="0.1" min="0">
+              </div>
+              <div class="setting-item">
+                <label>允许的最大滑点 (Slippage Limit)</label>
+                <input type="number" id="strat-swap-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
+              </div>
             </div>
           </div>
 
@@ -365,12 +365,12 @@
             </div>
             <div class="strategy-settings inline-settings">
               <div class="setting-item">
-                <label>大额买入触发阈值 (TAO)</label>
-                <input type="number" id="strat-sandwich-threshold" step="10" min="1">
-              </div>
-              <div class="setting-item">
                 <label>套利金额 (TAO)</label>
                 <input type="number" id="strat-sandwich-amount" step="1" min="1">
+              </div>
+              <div class="setting-item">
+                <label>大额买入触发阈值 (TAO)</label>
+                <input type="number" id="strat-sandwich-threshold" step="10" min="1">
               </div>
               <div class="setting-item">
                 <label>前置买入小费 (TAO)</label>
