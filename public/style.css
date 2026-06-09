@@ -643,6 +643,27 @@ input:checked + .slider:before {
   border-top: 1px dashed var(--card-border);
 }
 
+.grid-settings-2-rows {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--card-border);
+}
+
+@media (max-width: 1024px) {
+  .grid-settings-2-rows {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .grid-settings-2-rows {
+    grid-template-columns: 1fr;
+  }
+}
+
 .setting-item {
   flex: 1;
   min-width: 160px;
