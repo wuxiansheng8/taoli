@@ -30,6 +30,7 @@ const processedNetuids = new Map();
 const maxTipBySubnet = new Map(); // added for dynamic tip bidding
 let maxRegisterNetworkTip = 0; // added for dynamic registerNetwork tip bidding
 const dashingSuccessByNetuid = new Map(); // added for tracking successful snipes
+const activeSnipesByNetuid = new Set(); // added to prevent concurrent duplicate sniping loops
 
 // Subnet Owner, Hotkey & Registration Block Cache (to bypass RPC network queries during critical frontrunning path)
 const subnetOwnersCache = new Map();
@@ -770,7 +771,6 @@ function calculateDynamicTip(netuid, baseTip) {
 }
 
 // Strategy triggers and pending states
-let pendingNewSubnet = null; // Staking Snipe target: { netuid, hotkey, detectedAt }
 let pendingSandwichSell = null;
 
 // Core extrinsic execution triggers
@@ -815,12 +815,7 @@ async function handlePendingExtrinsic(parsed) {
           log('ERROR', `[新子网打新] 触发极速抢购失败: ${e.message}`);
         });
 
-        // 同时也保留 pendingNewSubnet 标记作为备用，确保在新区块头到达时，如果仍未成功则做最后一次安全补买
-        pendingNewSubnet = {
-          netuid: targetNetuid,
-          hotkey: targetHotkey,
-          detectedAt: now
-        };
+        // 链上兜底机制将通过新区块到达时的 detectNewSubnetOnChain 自愈检测自动执行
       } else {
         log('WARN', `[新子网打新] 扫到注册网络交易，但无法解析目标 netuid (${targetNetuid}) 或 hotkey (${targetHotkey})`);
       }
@@ -1217,6 +1212,12 @@ async function executeStakingSniping(netuid, hotkey) {
     return;
   }
 
+  // 1. 防重复运行锁（基于 netuid）：如果当前子网的打新循环已在运行，直接拦截
+  if (activeSnipesByNetuid.has(netuid)) {
+    log('INFO', `[新子网打新] 子网 #${netuid} 打新抢购循环已经在运行中，跳过重复触发。`);
+    return;
+  }
+
   // 优先用传入的 hotkey（从 pending registerNetwork 中提取的），否则回退使用 resolveHotkey
   let targetHotkey = hotkey;
   if (!targetHotkey) {
@@ -1229,63 +1230,117 @@ async function executeStakingSniping(netuid, hotkey) {
     return;
   }
 
+  const successKey = `${netuid}:${targetHotkey}`;
+  
+  // 2. 成功状态校验：若之前已有该子网的成功购买记录，直接拦截退出，防止重复买入
+  if (dashingSuccessByNetuid.get(successKey) === true) {
+    log('INFO', `[新子网打新] 检测到子网 #${netuid} (Hotkey: ${targetHotkey}) 已经打新成功，跳过执行。`);
+    return;
+  }
+
+  // 加锁，并初始化/确保成功标记
+  activeSnipesByNetuid.add(netuid);
+  if (dashingSuccessByNetuid.get(successKey) === undefined) {
+    dashingSuccessByNetuid.set(successKey, false);
+  }
+
   const targetTip = calculateDynamicTip(netuid, settings.dashingTip);
   const burstCount = Math.max(1, settings.dashingBurstCount || 1);
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
 
-  const successKey = `${netuid}:${targetHotkey}`;
-  dashingSuccessByNetuid.set(successKey, false);
-
   log('INFO', `[新子网打新] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 重试轮数: ${retries}, 间隔: ${interval}ms`);
   sendTelegramAlert(`🚀 [新子网打新 极速启动]\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n每轮并发数: ${burstCount}\n最大重试: ${retries}轮\n重试间隔: ${interval}ms`);
 
-  for (let attempt = 0; attempt < retries; attempt++) {
-    // 只有在尚未有任何一笔成功购买交易时，才进行新一轮的买入尝试
-    if (attempt > 0 && dashingSuccessByNetuid.get(successKey)) {
-      log('INFO', `[新子网打新] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮重试。`);
-      break;
-    }
+  try {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      // 只有在尚未有任何一笔成功购买交易时，才进行新一轮的买入尝试
+      if (attempt > 0 && dashingSuccessByNetuid.get(successKey)) {
+        log('INFO', `[新子网打新] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮重试。`);
+        break;
+      }
 
-    log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮购买尝试...`);
-    
-    for (const w of activeWallets) {
-      for (let i = 0; i < burstCount; i++) {
-        try {
-          const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, settings.dashingSlippageLimit);
-          log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
-          
-          // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
-          sendTx(tx, w.pair, settings.dashingTimeoutMs, targetTip, {
-            netuid,
-            hotkey: targetHotkey,
-            amountBigInt,
-            slippageLimit: settings.dashingSlippageLimit,
-            label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`
-          }).then(res => {
-            if (res.success) {
-              log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
-              // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
-              dashingSuccessByNetuid.set(successKey, true);
-              pendingNewSubnet = null;
-              sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
-            } else {
-              log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
-              if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                executeTimeoutRetry(w, netuid, targetHotkey, 1);
+      log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮购买尝试...`);
+      
+      for (const w of activeWallets) {
+        for (let i = 0; i < burstCount; i++) {
+          try {
+            const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, settings.dashingSlippageLimit);
+            log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
+            
+            // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
+            sendTx(tx, w.pair, settings.dashingTimeoutMs, targetTip, {
+              netuid,
+              hotkey: targetHotkey,
+              amountBigInt,
+              slippageLimit: settings.dashingSlippageLimit,
+              label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`
+            }).then(res => {
+              if (res.success) {
+                log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
+                // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
+                dashingSuccessByNetuid.set(successKey, true);
+                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
+              } else {
+                log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
+                if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
+                  executeTimeoutRetry(w, netuid, targetHotkey, 1);
+                }
               }
-            }
-          });
-        } catch (e) {
-          log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易抛出异常: ${e.message}`);
+            });
+          } catch (e) {
+            log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易抛出异常: ${e.message}`);
+          }
+        }
+      }
+
+      if (attempt < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, interval));
+      }
+    }
+  } finally {
+    // 整个抢购周期退出后（成功、达到重试上限或出现致命错误），解锁以允许后续可能的新子网操作
+    activeSnipesByNetuid.delete(netuid);
+  }
+}
+
+// 100% 独立链上自愈检测：检测是否有新注册/被接管回收的子网，并执行兜底抢单
+async function detectNewSubnetOnChain(blockHeight) {
+  if (!api || !api.isConnected) return;
+  try {
+    const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
+    const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());
+    
+    // 批量查询所有子网的注册区块号
+    const registeredBlocks = await api.query.subtensorModule.networkRegisteredAt.multi(activeNetuids);
+    
+    for (let i = 0; i < activeNetuids.length; i++) {
+      const netuid = activeNetuids[i];
+      const regBlockVal = registeredBlocks[i];
+      if (!regBlockVal || regBlockVal.isEmpty) continue;
+      
+      const regBlock = Number(regBlockVal.toString());
+      // 如果注册区块就是当前块，说明在这个块上发生了注册或接管回收！
+      if (regBlock === blockHeight) {
+        // 且该子网打新循环当前未在运行，则说明漏单了，立即进行链上兜底抢单！
+        if (!activeSnipesByNetuid.has(netuid)) {
+          log('SUCCESS', `[新子网打新] 链上自愈检测到子网 #${netuid} 在区块 #${blockHeight} 刚刚被注册/接管！触发 100% 独立自愈兜底抢单！`);
+          
+          // 查询 hotkey
+          const targetHotkey = await resolveHotkey(netuid);
+          if (targetHotkey) {
+            executeStakingSniping(netuid, targetHotkey).catch(e => {
+              log('ERROR', `[新子网打新] 触发链上兜底抢跑失败: ${e.message}`);
+            });
+          } else {
+            log('WARN', `[新子网打新] 无法为子网 #${netuid} 检索到有效 Hotkey，兜底取消。`);
+          }
         }
       }
     }
-
-    if (attempt < retries - 1) {
-      await new Promise(resolve => setTimeout(resolve, interval));
-    }
+  } catch (e) {
+    log('ERROR', `[新子网打新] 链上自愈检测发生异常: ${e.message}`);
   }
 }
 
@@ -1500,13 +1555,11 @@ async function connectWs(reason = 'Normal Boot') {
       global.blockCallback(currentBlockHeight);
     }
     
-    // Check pending New Subnet Staking Snipe
-    if (pendingNewSubnet) {
-      const snipe = pendingNewSubnet;
-      pendingNewSubnet = null; // Clear immediately
-      log('SUCCESS', `[新子网打新] 检测到新区块头 #${currentBlockHeight} 到达，立刻对新子网 #${snipe.netuid} (Hotkey: ${snipe.hotkey}) 执行 Staking 抢购！`);
-      executeStakingSniping(snipe.netuid, snipe.hotkey).catch(e => {
-        log('ERROR', `[新子网打新] 触发打新抢购失败: ${e.message}`);
+    // 100% 独立链上自愈检测：检测是否有新注册/回收的子网，并执行兜底抢跑
+    const settings = database.getSettings();
+    if (settings.dashingEnabled) {
+      detectNewSubnetOnChain(currentBlockHeight).catch(e => {
+        log('WARN', `[新子网打新] 链上自愈检测失败: ${e.message}`);
       });
     }
 
