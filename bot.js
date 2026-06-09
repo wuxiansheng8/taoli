@@ -1130,6 +1130,11 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
     timeoutRetries = Math.max(0, settings.swapTimeoutRetries || 0);
   }
 
+  let strategyName = 'rename';
+  if (label === '冷键交换抢跑') {
+    strategyName = 'coldkey-swap';
+  }
+
   const successKey = `${label}:${netuid}:${hotkey}`;
   const lockKey = `lock:${label}:${netuid}`;
 
@@ -1139,10 +1144,47 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
     return;
   }
 
-  // 2. 成功状态校验
+  // 2. 24小时冷却时间校验（持久化，不受重启影响，不管成功与否）
+  const cooldownKey = `${strategyName}:${netuid}`;
+  const cooldown = database.getCooldown(cooldownKey);
+  let shouldWriteCooldown = false;
+
+  if (cooldown) {
+    const elapsed = Date.now() - cooldown.firstTriggeredAt;
+    if (elapsed < 24 * 60 * 60 * 1000) {
+      if (Math.abs(currentBlockHeight - cooldown.block) <= 10) {
+        shouldWriteCooldown = false; // 同一次事件兜底，不刷新冷却
+      } else {
+        log('INFO', `[${label}] 检测到子网 #${netuid} 上次触发在 24 小时冷却时间内 (上次区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，且已超过防抖窗口，跳过重复触发。`);
+        return;
+      }
+    } else {
+      // 冷却已过，清理可能残留的内存成功状态
+      dashingSuccessByNetuid.delete(successKey);
+      shouldWriteCooldown = true;
+    }
+  } else {
+    dashingSuccessByNetuid.delete(successKey);
+    shouldWriteCooldown = true;
+  }
+
+  // 3. 内存成功状态校验（用于单次扫描中成功后提前退出）
   if (dashingSuccessByNetuid.get(successKey) === true) {
     log('INFO', `[${label}] 检测到子网 #${netuid} 之前已抢跑成功，跳过执行。`);
     return;
+  }
+
+  // 写入冷却时间（不论成功与否均冷却 24 小时，同一次防抖窗口内不重复刷新）
+  if (shouldWriteCooldown) {
+    const ok = database.setCooldown(cooldownKey, {
+      strategy: strategyName,
+      netuid: netuid,
+      block: currentBlockHeight,
+      hotkey: hotkey
+    });
+    if (!ok) {
+      log('WARN', `[${label}] 冷却状态写入失败: key = ${cooldownKey}`);
+    }
   }
 
   // 加锁并初始化成功状态
@@ -1402,10 +1444,47 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
   const successKey = `新子网打新:${netuid}:${targetHotkey}`;
   
-  // 2. 成功状态校验：若之前已有该子网的成功购买记录，直接拦截退出，防止重复买入
+  // 2. 24小时冷却时间校验（持久化，不受重启影响，不管成功与否）
+  const cooldownKey = `new-subnet:${netuid}`;
+  const cooldown = database.getCooldown(cooldownKey);
+  let shouldWriteCooldown = false;
+
+  if (cooldown) {
+    const elapsed = Date.now() - cooldown.firstTriggeredAt;
+    if (elapsed < 24 * 60 * 60 * 1000) {
+      if (Math.abs(currentBlockHeight - cooldown.block) <= 10) {
+        shouldWriteCooldown = false; // 同一次事件兜底，不刷新冷却
+      } else {
+        log('INFO', `[新子网打新] [触发源: ${triggerSource}] 检测到子网 #${netuid} 在 24 小时冷却时间内 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，且已超过防抖窗口，跳过重复触发。`);
+        return;
+      }
+    } else {
+      // 冷却已过，清理可能残留的内存成功状态
+      dashingSuccessByNetuid.delete(successKey);
+      shouldWriteCooldown = true;
+    }
+  } else {
+    dashingSuccessByNetuid.delete(successKey);
+    shouldWriteCooldown = true;
+  }
+
+  // 3. 内存成功状态校验：若之前已有该子网的成功购买记录，直接拦截退出，防止重复买入
   if (dashingSuccessByNetuid.get(successKey) === true) {
     log('INFO', `[新子网打新] 检测到子网 #${netuid} (Hotkey: ${targetHotkey}) 已经打新成功，跳过执行。`);
     return;
+  }
+
+  // 写入冷却时间（不论成功与否均冷却 24 小时，同一次防抖窗口内不重复刷新）
+  if (shouldWriteCooldown) {
+    const ok = database.setCooldown(cooldownKey, {
+      strategy: 'new-subnet',
+      netuid: netuid,
+      block: currentBlockHeight,
+      hotkey: targetHotkey
+    });
+    if (!ok) {
+      log('WARN', `[新子网打新] 冷却状态写入失败: key = ${cooldownKey}`);
+    }
   }
 
   // 加锁，并初始化/确保成功标记

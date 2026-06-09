@@ -6,6 +6,7 @@ const DATA_DIR = path.join(__dirname, 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const WALLETS_FILE = path.join(DATA_DIR, 'wallets.json');
 const KEY_FILE = path.join(DATA_DIR, '.key');
+const COOLDOWNS_FILE = path.join(DATA_DIR, 'cooldowns.json');
 
 const ENCRYPTION_ALGORITHM = 'aes-256-cbc';
 const IV_LENGTH = 16;
@@ -246,11 +247,52 @@ function deleteWallet(name) {
   return { success: true };
 }
 
+function getCooldown(key) {
+  try {
+    if (!fs.existsSync(COOLDOWNS_FILE)) return null;
+    const cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
+    return cooldowns[key] || null;
+  } catch (e) {
+    console.error('Error reading cooldowns:', e);
+    return null;
+  }
+}
+
+function setCooldown(key, data) {
+  try {
+    let cooldowns = {};
+    if (fs.existsSync(COOLDOWNS_FILE)) {
+      cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
+    }
+    cooldowns[key] = {
+      ...data,
+      firstTriggeredAt: Date.now()
+    };
+    
+    // Clean up expired cooldowns (older than 24 hours)
+    const now = Date.now();
+    const expiry = 24 * 60 * 60 * 1000;
+    for (const k in cooldowns) {
+      if (!cooldowns[k] || !cooldowns[k].firstTriggeredAt || now - cooldowns[k].firstTriggeredAt > expiry) {
+        delete cooldowns[k];
+      }
+    }
+    
+    fs.writeFileSync(COOLDOWNS_FILE, JSON.stringify(cooldowns, null, 2), 'utf8');
+    return true;
+  } catch (e) {
+    console.error('Error writing cooldowns:', e);
+    return false;
+  }
+}
+
 module.exports = {
   getSettings,
   saveSettings,
   getWallets,
   addWallet,
   deleteWallet,
-  hashPassword
+  hashPassword,
+  getCooldown,
+  setCooldown
 };
