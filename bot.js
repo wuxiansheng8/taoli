@@ -771,6 +771,7 @@ function calculateDynamicTip(netuid, baseTip) {
 }
 
 // Strategy triggers and pending states
+let pendingNewSubnet = null; // Staking Snipe target: { netuid, hotkey, detectedAt }
 let pendingSandwichSell = null;
 
 // Core extrinsic execution triggers
@@ -815,7 +816,12 @@ async function handlePendingExtrinsic(parsed) {
           log('ERROR', `[新子网打新] 触发极速抢购失败: ${e.message}`);
         });
 
-        // 链上兜底机制将通过新区块到达时的 detectNewSubnetOnChain 自愈检测自动执行
+        // 同时也保留 pendingNewSubnet 标记作为备用，确保在新区块头到达时，如果仍未成功则做快速内存兜底
+        pendingNewSubnet = {
+          netuid: targetNetuid,
+          hotkey: targetHotkey,
+          detectedAt: now
+        };
       } else {
         log('WARN', `[新子网打新] 扫到注册网络交易，但无法解析目标 netuid (${targetNetuid}) 或 hotkey (${targetHotkey})`);
       }
@@ -984,9 +990,11 @@ async function handlePendingExtrinsic(parsed) {
 }
 
 // Resolve a valid hotkey for a given subnet using multi-tiered fallback
-async function resolveHotkey(netuid) {
-  const cached = subnetHotkeysCache.get(netuid);
-  if (cached && cached.length >= 47) return cached;
+async function resolveHotkey(netuid, force = false) {
+  if (!force) {
+    const cached = subnetHotkeysCache.get(netuid);
+    if (cached && cached.length >= 47) return cached;
+  }
 
   try {
     const ownerHotkeyObj = await api.query.subtensorModule.subnetOwnerHotkey(netuid);
@@ -1281,6 +1289,7 @@ async function executeStakingSniping(netuid, hotkey) {
                 log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
                 // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
                 dashingSuccessByNetuid.set(successKey, true);
+                pendingNewSubnet = null; // 清除内存兜底，防重复触发
                 sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
@@ -1300,8 +1309,12 @@ async function executeStakingSniping(netuid, hotkey) {
       }
     }
   } finally {
-    // 整个抢购周期退出后（成功、达到重试上限或出现致命错误），解锁以允许后续可能的新子网操作
-    activeSnipesByNetuid.delete(netuid);
+    // 整个抢购周期退出后（成功、达到重试上限或出现致命错误），延迟解锁。
+    // 延迟时间根据交易超时参数设定，以保证仍在 pending 的交易有足够时间出结果，彻底防范重复抢购循环。
+    const lockDuration = Math.max(30000, (settings.dashingTimeoutMs || 30000) + 2000);
+    setTimeout(() => {
+      activeSnipesByNetuid.delete(netuid);
+    }, lockDuration);
   }
 }
 
@@ -1309,27 +1322,48 @@ async function executeStakingSniping(netuid, hotkey) {
 async function detectNewSubnetOnChain(blockHeight) {
   if (!api || !api.isConnected) return;
   try {
-    const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
-    const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());
+    // 1. 从缓存中获取已知的子网列表
+    const cachedNetuids = Array.from(subnetRegisteredAtCache.keys());
     
-    // 批量查询所有子网的注册区块号
-    const registeredBlocks = await api.query.subtensorModule.networkRegisteredAt.multi(activeNetuids);
+    // 如果缓存为空（例如启动时加载失败），构建默认的查询列表 (0 到 32)
+    const netuidsToQuery = cachedNetuids.length > 0 
+      ? [...cachedNetuids] 
+      : Array.from({ length: 33 }, (_, i) => i);
+      
+    // 2. 预测并包含下一个可能新增的 netuid (maxCached + 1)
+    const maxCached = cachedNetuids.length > 0 ? Math.max(...cachedNetuids) : -1;
+    if (maxCached >= 0 && maxCached < 256) {
+      netuidsToQuery.push(maxCached + 1);
+    }
     
-    for (let i = 0; i < activeNetuids.length; i++) {
-      const netuid = activeNetuids[i];
+    // 3. 仅用一个批处理 RPC 查询所有这些子网的最新注册区块
+    const registeredBlocks = await api.query.subtensorModule.networkRegisteredAt.multi(netuidsToQuery);
+    
+    for (let i = 0; i < netuidsToQuery.length; i++) {
+      const netuid = netuidsToQuery[i];
       const regBlockVal = registeredBlocks[i];
       if (!regBlockVal || regBlockVal.isEmpty) continue;
       
       const regBlock = Number(regBlockVal.toString());
-      // 如果注册区块就是当前块，说明在这个块上发生了注册或接管回收！
-      if (regBlock === blockHeight) {
-        // 且该子网打新循环当前未在运行，则说明漏单了，立即进行链上兜底抢单！
+      if (regBlock === 0) continue;
+      
+      // 获取该子网已缓存的注册区块号
+      const cachedRegBlock = subnetRegisteredAtCache.get(netuid);
+      
+      // 如果注册区块与当前区块相同，且（缓存中不存在该子网，或缓存的注册区块小于最新注册区块）
+      // 这说明：要么是一个全新的 netuid，要么是一个被接管回收(recycled)的 netuid！
+      if (regBlock === blockHeight && (!cachedRegBlock || cachedRegBlock < regBlock)) {
+        // 且该子网打新当前未在运行，立即进行链上兜底抢单！
         if (!activeSnipesByNetuid.has(netuid)) {
-          log('SUCCESS', `[新子网打新] 链上自愈检测到子网 #${netuid} 在区块 #${blockHeight} 刚刚被注册/接管！触发 100% 独立自愈兜底抢单！`);
+          log('SUCCESS', `[新子网打新] 链上自愈检测到子网 #${netuid} 在区块 #${blockHeight} 刚刚被注册/接管！(缓存区块: ${cachedRegBlock || '无'} -> 当前区块: ${regBlock})。触发 100% 独立自愈兜底抢单！`);
           
-          // 查询 hotkey
-          const targetHotkey = await resolveHotkey(netuid);
+          // 强行从链上获取最新 hotkey（绕过并强制刷新缓存，因为 recycled 子网的 hotkey 必定变了）
+          const targetHotkey = await resolveHotkey(netuid, true);
           if (targetHotkey) {
+            // 立即手动更新本地缓存以防同一区块内可能的其他异步检测造成竞态触发
+            subnetRegisteredAtCache.set(netuid, regBlock);
+            subnetHotkeysCache.set(netuid, targetHotkey);
+            
             executeStakingSniping(netuid, targetHotkey).catch(e => {
               log('ERROR', `[新子网打新] 触发链上兜底抢跑失败: ${e.message}`);
             });
@@ -1555,12 +1589,32 @@ async function connectWs(reason = 'Normal Boot') {
       global.blockCallback(currentBlockHeight);
     }
     
-    // 100% 独立链上自愈检测：检测是否有新注册/回收的子网，并执行兜底抢跑
+    // 100% 独立链上自愈检测：检测是否有新注册/回收的子网，并执行兜底抢单
     const settings = database.getSettings();
     if (settings.dashingEnabled) {
-      detectNewSubnetOnChain(currentBlockHeight).catch(e => {
-        log('WARN', `[新子网打新] 链上自愈检测失败: ${e.message}`);
+      const runDashingFlow = async () => {
+        if (pendingNewSubnet) {
+          const snipe = pendingNewSubnet;
+          pendingNewSubnet = null; // 立即清除，防止重复触发
+          log('SUCCESS', `[新子网打新] 检测到新区块头 #${currentBlockHeight} 到达，立刻对内存中的新子网 #${snipe.netuid} (Hotkey: ${snipe.hotkey}) 执行 Staking 抢购！`);
+          executeStakingSniping(snipe.netuid, snipe.hotkey).catch(e => {
+            log('ERROR', `[新子网打新] 触发内存兜底打新抢购失败: ${e.message}`);
+          });
+          // 内存快速兜底后，也同步更新一次缓存
+          await refreshSubnetOwnersCache();
+        } else {
+          // 运行链上自愈，完成后才允许刷新缓存，彻底杜绝缓存更新竞态
+          await detectNewSubnetOnChain(currentBlockHeight);
+          await refreshSubnetOwnersCache();
+        }
+      };
+      
+      runDashingFlow().catch(e => {
+        log('WARN', `[新子网打新] 链上自愈检测/缓存同步失败: ${e.message}`);
       });
+    } else {
+      // 若打新未启用，依然刷新缓存以供其它策略使用
+      refreshSubnetOwnersCache().catch(() => {});
     }
 
     // Check pending Sandwich Sell (Backrun)
@@ -1570,9 +1624,6 @@ async function connectWs(reason = 'Normal Boot') {
       log('INFO', `[三明治套利] 检测到新区块 #${currentBlockHeight}，自动执行后置售出！`);
       await executeSandwichSell(sell.netuid, sell.hotkey, sell.amount, sell.tip);
     }
-
-    // Refresh subnet owners cache asynchronously in the background for the next block
-    refreshSubnetOwnersCache().catch(() => {});
   });
 
   // Start Mempool Polling
