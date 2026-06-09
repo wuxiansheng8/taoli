@@ -1487,7 +1487,8 @@ module.exports = {
     latency: currentLatency,
     blockHeight: currentBlockHeight,
     uptime: getUptimeSeconds(),
-    broadcastNodes: getBroadcastNodesStatus()
+    broadcastNodes: getBroadcastNodesStatus(),
+    serverTime: Date.now()
   }),
   setLogCallback: (cb) => { global.logCallback = cb; },
   setBlockCallback: (cb) => { global.blockCallback = cb; }

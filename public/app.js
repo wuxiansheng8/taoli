@@ -4,6 +4,7 @@ let ws = null;
 let uptimeInterval = null;
 let systemUptimeSeconds = 0;
 let clockInterval = null;
+let timeOffset = 0;
 
 // API Helper
 async function apiFetch(url, options = {}) {
@@ -31,8 +32,8 @@ function startClock() {
     const clockEl = document.getElementById('clock-beijing');
     if (!clockEl) return;
     
-    // Get Beijing Time (UTC+8)
-    const d = new Date();
+    // Get Beijing Time (UTC+8) synced with Server Time
+    const d = new Date(Date.now() + timeOffset);
     const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
     const beijing = new Date(utc + (3600000 * 8));
     
@@ -131,6 +132,10 @@ function updateHeaderStatus(data) {
   document.getElementById('header-uptime').innerText = formatDuration(systemUptimeSeconds);
   
   document.getElementById('sidebar-node').innerText = data.activeNode || '未连接';
+
+  if (data.serverTime !== undefined) {
+    timeOffset = data.serverTime - Date.now();
+  }
 
   // Render broadcast nodes status table
   const broadcastListEl = document.getElementById('broadcast-nodes-list');
