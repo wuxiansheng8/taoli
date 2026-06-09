@@ -450,10 +450,13 @@ async function refreshAllWallets() {
   return getWalletsStatus();
 }
 // Reload wallets from database into memory dynamically
-async function reloadWallets() {
+async function reloadWallets(actionContext = null) {
   await cryptoWaitReady();
   keyring = new Keyring({ type: 'sr25519' });
   
+  if (actionContext) {
+    log('SUCCESS', `[钱包管理] ${actionContext}`);
+  }
   log('INFO', '正在重新加载数据库中的钱包至内存中...');
   const localWallets = database.getWallets(true); // Decrypted secrets
   const newWallets = [];

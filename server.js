@@ -194,7 +194,7 @@ app.post('/api/wallets', requireAuth, async (req, res) => {
   if (result.success) {
     // Reload wallets dynamically inside bot
     try {
-      await bot.reloadWallets();
+      await bot.reloadWallets(`成功导入新钱包【${name}】(地址: ${address.slice(0, 8)}...${address.slice(-6)})`);
     } catch (err) {
       console.error('Failed to hot-reload wallets in memory:', err.message);
     }
@@ -213,7 +213,7 @@ app.delete('/api/wallets', requireAuth, async (req, res) => {
   if (result.success) {
     // Reload wallets dynamically inside bot
     try {
-      await bot.reloadWallets();
+      await bot.reloadWallets(`成功删除钱包【${name}】`);
     } catch (err) {
       console.error('Failed to hot-reload wallets in memory:', err.message);
     }
@@ -255,7 +255,7 @@ app.post('/api/bot/stop', requireAuth, (req, res) => {
 
 app.post('/api/wallets/reload', requireAuth, async (req, res) => {
   try {
-    await bot.reloadWallets();
+    await bot.reloadWallets('手动重新加载并同步钱包状态');
     const list = bot.getWalletsStatus();
     res.json({ success: true, wallets: list });
   } catch (e) {
