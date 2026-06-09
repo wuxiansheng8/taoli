@@ -353,7 +353,7 @@ async function refreshWalletState(address) {
     const nonce = await api.rpc.system.accountNextIndex(address);
     const nextNonce = Number(nonce.toString());
     
-    balanceByAddress.set(address, { freeTao, updatedAt: new Date().toISOString() });
+    balanceByAddress.set(address, { freeTao, updatedAt: new Date(Date.now() + 8 * 3600000).toISOString() });
     nextNonceByAddress.set(address, nextNonce);
   } catch (e) {
     log('WARN', `刷新钱包 ${address.slice(-6)} 状态失败: ${e.message}`);
@@ -383,7 +383,7 @@ async function refreshAllWallets() {
       const freePlanck = BigInt(account.data.free.toString());
       const freeTao = Number(freePlanck) / 1e9;
       
-      balanceByAddress.set(address, { freeTao, updatedAt: new Date().toISOString() });
+      balanceByAddress.set(address, { freeTao, updatedAt: new Date(Date.now() + 8 * 3600000).toISOString() });
       nextNonceByAddress.set(address, nextNonce);
     }
   } catch (e) {

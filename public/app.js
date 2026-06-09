@@ -79,7 +79,7 @@ function connectWebSocket() {
   
   ws.onopen = () => {
     appendLogLine({
-      time: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      time: new Date(Date.now() + 8 * 3600000).toISOString().replace('T', ' ').slice(0, 19),
       level: 'INFO',
       message: '与服务器的 WebSocket 实时日志通道建立成功。'
     }, 'system');
