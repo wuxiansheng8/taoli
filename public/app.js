@@ -484,6 +484,27 @@ document.getElementById('btn-refresh-balances').onclick = async () => {
   }
 };
 
+// Restart bot on wallet page click
+document.getElementById('btn-restart-bot-wallets').onclick = async () => {
+  const btn = document.getElementById('btn-restart-bot-wallets');
+  btn.disabled = true;
+  btn.innerText = '正在重启应用...';
+  try {
+    const res = await apiFetch('/api/bot/restart', { method: 'POST' });
+    if (res.success) {
+      alert('一键重启成功，钱包已重新加载并完成初始化！');
+      refreshWallets();
+    } else {
+      alert('重启失败: ' + res.error);
+    }
+  } catch (e) {
+    alert('重启请求出错: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.innerText = '一键重启应用钱包';
+  }
+};
+
 // Save general system settings
 document.getElementById('settings-form').onsubmit = async (e) => {
   e.preventDefault();

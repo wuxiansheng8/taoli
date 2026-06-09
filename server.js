@@ -243,6 +243,18 @@ app.post('/api/bot/stop', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/api/bot/restart', requireAuth, (req, res) => {
+  try {
+    bot.stopBot();
+    setTimeout(() => {
+      bot.startBot();
+      res.json({ success: true });
+    }, 1000);
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // Serve frontend SPA
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
