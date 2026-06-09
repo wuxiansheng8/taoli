@@ -171,38 +171,50 @@ if command -v pm2 &> /dev/null; then
   } catch(e) { console.log(8080); }
   " 2>/dev/null)
   
+  PORT_PIDS=""
   if command -v lsof >/dev/null 2>&1; then
     PIDS=$(lsof -tiTCP:$PORT -sTCP:LISTEN || true)
+    PORT_PIDS="$PIDS"
 
     if [ -n "$PIDS" ]; then
       echo -e "${YELLOW}检测到端口 $PORT 被以下进程占用：${NC}"
       lsof -iTCP:$PORT -sTCP:LISTEN || true
+    fi
+  elif command -v ss >/dev/null 2>&1; then
+    SS_OUTPUT=$(sudo ss -lntup 2>/dev/null | grep ":$PORT " || true)
+    PORT_PIDS=$(echo "$SS_OUTPUT" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
 
-      for PID in $PIDS; do
-        CMD=$(ps -p "$PID" -o comm= 2>/dev/null || true)
-        ARGS=$(ps -p "$PID" -o args= 2>/dev/null || true)
-
-        if [ -n "$DETECTED_PM2_ID" ] && pm2 pid "$DETECTED_PM2_ID" 2>/dev/null | grep -qx "$PID"; then
-          echo -e "${BLUE}端口由当前 PM2 管理的机器人进程占用，稍后将通过 PM2 restart 正常重启：PID=$PID${NC}"
-          continue
-        fi
-
-        if echo "$ARGS" | grep -q "server.js"; then
-          echo -e "${YELLOW}检测到疑似旧机器人孤儿进程 PID=$PID，先尝试正常结束...${NC}"
-          kill "$PID" 2>/dev/null || true
-          sleep 2
-
-          if kill -0 "$PID" 2>/dev/null; then
-            echo -e "${RED}进程仍未退出，强制结束 PID=$PID...${NC}"
-            kill -9 "$PID" 2>/dev/null || true
-          fi
-        else
-          echo -e "${BLUE}端口占用进程不是 server.js，跳过强杀：PID=$PID CMD=$CMD${NC}"
-        fi
-      done
+    if [ -n "$PORT_PIDS" ]; then
+      echo -e "${YELLOW}检测到端口 $PORT 被以下进程占用 (ss)：${NC}"
+      echo "$SS_OUTPUT"
     fi
   else
-    echo -e "${YELLOW}未安装 lsof，跳过端口占用自动释放。${NC}"
+    echo -e "${YELLOW}未安装 lsof/ss，跳过端口占用自动释放。${NC}"
+  fi
+
+  if [ -n "$PORT_PIDS" ]; then
+    for PID in $PORT_PIDS; do
+      CMD=$(ps -p "$PID" -o comm= 2>/dev/null || true)
+      ARGS=$(ps -p "$PID" -o args= 2>/dev/null || true)
+
+      if [ -n "$DETECTED_PM2_ID" ] && pm2 pid "$DETECTED_PM2_ID" 2>/dev/null | grep -qx "$PID"; then
+        echo -e "${BLUE}端口由当前 PM2 管理的机器人进程占用，稍后将通过 PM2 restart 正常重启：PID=$PID${NC}"
+        continue
+      fi
+
+      if echo "$ARGS" | grep -q "server.js"; then
+        echo -e "${YELLOW}检测到疑似旧机器人孤儿进程 PID=$PID，先尝试正常结束...${NC}"
+        kill "$PID" 2>/dev/null || true
+        sleep 2
+
+        if kill -0 "$PID" 2>/dev/null; then
+          echo -e "${RED}进程仍未退出，强制结束 PID=$PID...${NC}"
+          kill -9 "$PID" 2>/dev/null || true
+        fi
+      else
+        echo -e "${BLUE}端口占用进程不是 server.js，跳过强杀：PID=$PID CMD=$CMD${NC}"
+      fi
+    done
   fi
   
   if [ -n "$DETECTED_PM2_ID" ]; then
