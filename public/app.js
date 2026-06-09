@@ -188,6 +188,25 @@ function appendLogLine(logEntry, customClass = '') {
   consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
+// Load Logs History from backend
+async function loadLogsHistory() {
+  try {
+    const history = await apiFetch('/api/logs');
+    const consoleEl = document.getElementById('logs-console');
+    if (!consoleEl) return;
+    
+    consoleEl.innerHTML = ''; // Clear loading message
+    
+    if (Array.isArray(history)) {
+      history.forEach(logEntry => {
+        appendLogLine(logEntry);
+      });
+    }
+  } catch (e) {
+    console.error('加载日志历史失败:', e);
+  }
+}
+
 // Render Wallets list
 function renderWallets(wallets) {
   const listEl = document.getElementById('wallets-list');
@@ -637,6 +656,7 @@ function showDashboard() {
   initTabs();
   loadConfig();
   refreshWallets();
+  loadLogsHistory();
 }
 
 // Initial Boot Checker
