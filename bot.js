@@ -565,6 +565,30 @@ function parseExtrinsic(ext) {
 
 // Compute next subnet to prune based on Yuma Consensus rules
 async function getNextPruneCandidate(currentBlock) {
+  // 优先尝试使用 subtensor 官方的 runtime API getSubnetToPrune (仅需1次 RPC 请求)
+  try {
+    if (api.call.subnetInfoRuntimeApi && api.call.subnetInfoRuntimeApi.getSubnetToPrune) {
+      const pruneNetuidVal = await api.call.subnetInfoRuntimeApi.getSubnetToPrune();
+      if (pruneNetuidVal !== undefined && pruneNetuidVal !== null) {
+        let pruneNetuid;
+        if (typeof pruneNetuidVal.isSome === 'boolean') {
+          if (pruneNetuidVal.isSome) {
+            pruneNetuid = Number(pruneNetuidVal.unwrap().toString());
+          }
+        } else {
+          pruneNetuid = Number(pruneNetuidVal.toString());
+        }
+        if (pruneNetuid !== undefined && !isNaN(pruneNetuid)) {
+          log('INFO', `[子网注销候选] 通过 SubnetInfoRuntimeApi 运行时 API 直接查询成功，目标 netuid: #${pruneNetuid}`);
+          return pruneNetuid;
+        }
+      }
+    }
+  } catch (err) {
+    log('WARN', `通过 SubnetInfoRuntimeApi.getSubnetToPrune 获取待注销子网失败: ${err.message}，已安全降级至批量多包计算`);
+  }
+
+  // 降级使用批量多包并发查询进行本地 Yuma 规则计算
   try {
     const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
     const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());

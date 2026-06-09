@@ -37,19 +37,8 @@ function startClock() {
       serverTimestamp += 500;
     }
     
-    // Get Beijing Time (UTC+8) synced with Server Time
-    const d = new Date(serverTimestamp > 0 ? serverTimestamp : Date.now());
-    const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
-    const beijing = new Date(utc + (3600000 * 8));
-    
-    const year = beijing.getFullYear();
-    const month = String(beijing.getMonth() + 1).padStart(2, '0');
-    const date = String(beijing.getDate()).padStart(2, '0');
-    const hours = String(beijing.getHours()).padStart(2, '0');
-    const minutes = String(beijing.getMinutes()).padStart(2, '0');
-    const seconds = String(beijing.getSeconds()).padStart(2, '0');
-    
-    clockEl.innerText = `${year}-${month}-${date} ${hours}:${minutes}:${seconds}`;
+    const beijingMs = (serverTimestamp > 0 ? serverTimestamp : Date.now()) + 8 * 3600000;
+    clockEl.innerText = new Date(beijingMs).toISOString().replace('T', ' ').slice(0, 19);
   }, 500);
 }
 
@@ -683,6 +672,11 @@ async function syncServerTime() {
     const data = await apiFetch('/api/status');
     if (data && data.serverTime) {
       serverTimestamp = data.serverTime;
+      const clockEl = document.getElementById('clock-beijing');
+      if (clockEl) {
+        const beijingMs = serverTimestamp + 8 * 3600000;
+        clockEl.innerText = new Date(beijingMs).toISOString().replace('T', ' ').slice(0, 19);
+      }
     }
   } catch (e) {}
 }
