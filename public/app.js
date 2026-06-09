@@ -309,6 +309,7 @@ async function loadConfig() {
     document.getElementById('strat-dashing-retries').value = cfg.dashingRetries;
     document.getElementById('strat-dashing-interval').value = cfg.dashingIntervalMs;
     document.getElementById('strat-dashing-timeout').value = cfg.dashingTimeoutMs;
+    document.getElementById('strat-dashing-timeout-retries').value = cfg.dashingTimeoutRetries !== undefined ? cfg.dashingTimeoutRetries : 0;
     document.getElementById('strat-dashing-tip').value = cfg.dashingTip;
     
     document.getElementById('strat-rename-enabled').checked = cfg.renameEnabled;
@@ -362,6 +363,7 @@ async function saveStrategies() {
     dashingRetries: Number(document.getElementById('strat-dashing-retries').value),
     dashingIntervalMs: Number(document.getElementById('strat-dashing-interval').value),
     dashingTimeoutMs: Number(document.getElementById('strat-dashing-timeout').value),
+    dashingTimeoutRetries: Number(document.getElementById('strat-dashing-timeout-retries').value || 0),
     dashingTip: Number(document.getElementById('strat-dashing-tip').value),
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,

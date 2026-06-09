@@ -61,7 +61,7 @@ const DEFAULT_SETTINGS = {
   dashingTip: 1.0, // extra priority tip
   dashingSlippageLimit: 0.10, // 10% slippage for register buy-in
   dashingBurstCount: 1, // number of concurrent staking transactions per wallet
-
+  dashingTimeoutRetries: 0,
   
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,
