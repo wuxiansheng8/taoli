@@ -32,7 +32,21 @@ echo ""
 echo -e "${YELLOW}>>> [第二步] 正在应用代码更新...${NC}"
 if [ -d ".git" ]; then
   echo -e "${BLUE}检测到 Git 仓库，正在获取远程最新版本...${NC}"
-  git fetch --all
+  CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
+  if [ -z "$CURRENT_BRANCH" ]; then
+    CURRENT_BRANCH="main"
+  fi
+  REMOTE_REF="origin/$CURRENT_BRANCH"
+  OLD_UPDATE_HASH=$(git rev-parse HEAD:update.sh 2>/dev/null || true)
+
+  if ! git fetch --all --prune; then
+    echo -e "${RED}Git fetch 失败，更新已终止，未重启服务。${NC}"
+    exit 1
+  fi
+  if ! git rev-parse --verify "$REMOTE_REF" >/dev/null 2>&1; then
+    echo -e "${YELLOW}未找到远程分支 $REMOTE_REF，自动回退使用 origin/main。${NC}"
+    REMOTE_REF="origin/main"
+  fi
   
   # Check for uncommitted changes
   HAS_CHANGES=$(git status --porcelain)
@@ -41,26 +55,45 @@ if [ -d ".git" ]; then
     echo -n -e "${CYAN}是否强制清除本地修改并更新到最新版？(输入 y 强制覆盖并更新，输入其他键尝试保留修改升级) [y/N]: ${NC}"
     read -r FORCE_UPDATE
     if [ "$FORCE_UPDATE" = "y" ] || [ "$FORCE_UPDATE" = "Y" ]; then
-      echo -e "${BLUE}正在执行强制更新 (git reset --hard)...${NC}"
-      git reset --hard origin/$(git branch --show-current 2>/dev/null || echo "main")
+      echo -e "${BLUE}正在执行强制更新 (git reset --hard + git clean -fd)...${NC}"
+      if ! git reset --hard "$REMOTE_REF"; then
+        echo -e "${RED}Git reset 失败，更新已终止，未重启服务。${NC}"
+        exit 1
+      fi
+      git clean -fd
       echo -e "${GREEN}本地修改已清理，代码已重置到最新版本！${NC}"
     else
       echo -e "${YELLOW}正在尝试暂存本地更改以防冲突...${NC}"
-      git stash
+      if ! git stash push -u -m "taoli-auto-update-$(date +%Y%m%d_%H%M%S)"; then
+        echo -e "${RED}Git stash 失败，更新已终止，未重启服务。${NC}"
+        exit 1
+      fi
       if git pull; then
         echo -e "${GREEN}代码拉取成功！${NC}"
       else
-        echo -e "${RED}Git 拉取失败，请检查网络或冲突！${NC}"
+        echo -e "${RED}Git 拉取失败，请检查网络或冲突！更新已终止，未重启服务。${NC}"
+        exit 1
       fi
       echo -e "${BLUE}正在尝试恢复您的本地修改...${NC}"
-      git stash pop || echo -e "${RED}恢复本地修改失败，存在冲突，请手动解决或重新运行本脚本选择强制覆盖。${NC}"
+      if ! git stash pop; then
+        echo -e "${RED}恢复本地修改失败，存在冲突。请手动解决，或重新运行本脚本选择强制覆盖。服务未重启。${NC}"
+        exit 1
+      fi
     fi
   else
     if git pull; then
       echo -e "${GREEN}代码拉取成功！${NC}"
     else
-      echo -e "${RED}Git 拉取失败，请检查网络或冲突！${NC}"
+      echo -e "${RED}Git 拉取失败，请检查网络或冲突！更新已终止，未重启服务。${NC}"
+      exit 1
     fi
+  fi
+
+  NEW_UPDATE_HASH=$(git rev-parse HEAD:update.sh 2>/dev/null || true)
+  if [ -n "$OLD_UPDATE_HASH" ] && [ -n "$NEW_UPDATE_HASH" ] && [ "$OLD_UPDATE_HASH" != "$NEW_UPDATE_HASH" ] && [ "${TAOLI_UPDATE_REEXEC:-0}" != "1" ]; then
+    chmod +x ./update.sh 2>/dev/null || true
+    echo -e "${YELLOW}检测到 update.sh 自身已更新，正在切换到新版脚本重新执行，确保本次更新逻辑生效...${NC}"
+    exec env TAOLI_UPDATE_REEXEC=1 bash ./update.sh
   fi
 else
   echo -e "${YELLOW}当前不是 Git 仓库。如果您是从压缩包或手动更新：${NC}"
@@ -78,7 +111,7 @@ echo -e "${YELLOW}>>> [第三步] 正在恢复备份的私有数据...${NC}"
 mkdir -p data
 if [ -d "$BACKUP_DIR" ] && [ "$(ls -A "$BACKUP_DIR" 2>/dev/null)" ]; then
   cp -rp "$BACKUP_DIR"/. data/
-  chmod 600 data/settings.json data/wallets.json 2>/dev/null
+  chmod 600 data/settings.json data/wallets.json data/.key 2>/dev/null
   echo -e "${GREEN}私有数据（配置文件、钱包数据等）已成功恢复！${NC}"
 else
   echo -e "${YELLOW}无备份数据需要恢复。${NC}"
@@ -87,7 +120,10 @@ echo ""
 
 # 4. 安装/更新依赖
 echo -e "${YELLOW}>>> [第四步] 正在安装与更新 NPM 依赖包...${NC}"
-npm install --production
+if ! npm install --omit=dev; then
+  echo -e "${RED}NPM 依赖安装失败，更新已终止，未重启服务。${NC}"
+  exit 1
+fi
 echo -e "${GREEN}依赖包更新成功！${NC}"
 echo ""
 
@@ -106,7 +142,7 @@ echo -e "${YELLOW}>>> [第六步] 正在重启机器人进程守护服务...${NC
 if command -v pm2 &> /dev/null; then
   # 动态检测当前工作目录下已注册的 PM2 进程名
   export CURRENT_DIR=$(pwd)
-  DETECTED_PM2_NAME=$(node -e "
+  DETECTED_PM2_INFO=$(node -e "
   const execSync = require('child_process').execSync;
   const path = require('path');
   try {
@@ -116,13 +152,14 @@ if command -v pm2 &> /dev/null; then
       const cwd = env.pm_cwd || env.cwd;
       return cwd && path.resolve(cwd) === path.resolve(process.env.CURRENT_DIR);
     });
-    if (match) console.log(match.name);
+    if (match) console.log(String(match.pm_id) + '|' + match.name);
   } catch (e) {}
   " 2>/dev/null)
-
-  if [ -n "$DETECTED_PM2_NAME" ]; then
-    echo -e "${YELLOW}正在临时停止已有的 PM2 进程: $DETECTED_PM2_NAME...${NC}"
-    pm2 stop "$DETECTED_PM2_NAME" 2>/dev/null || true
+  DETECTED_PM2_ID=""
+  DETECTED_PM2_NAME=""
+  if [ -n "$DETECTED_PM2_INFO" ]; then
+    DETECTED_PM2_ID="${DETECTED_PM2_INFO%%|*}"
+    DETECTED_PM2_NAME="${DETECTED_PM2_INFO#*|}"
   fi
 
   # 主动检查并释放可能被残留/孤儿进程占用的 Web 端口，防止启动冲突
@@ -145,6 +182,11 @@ if command -v pm2 &> /dev/null; then
         CMD=$(ps -p "$PID" -o comm= 2>/dev/null || true)
         ARGS=$(ps -p "$PID" -o args= 2>/dev/null || true)
 
+        if [ -n "$DETECTED_PM2_ID" ] && pm2 pid "$DETECTED_PM2_ID" 2>/dev/null | grep -qx "$PID"; then
+          echo -e "${BLUE}端口由当前 PM2 管理的机器人进程占用，稍后将通过 PM2 restart 正常重启：PID=$PID${NC}"
+          continue
+        fi
+
         if echo "$ARGS" | grep -q "server.js"; then
           echo -e "${YELLOW}检测到疑似旧机器人孤儿进程 PID=$PID，先尝试正常结束...${NC}"
           kill "$PID" 2>/dev/null || true
@@ -163,17 +205,26 @@ if command -v pm2 &> /dev/null; then
     echo -e "${YELLOW}未安装 lsof，跳过端口占用自动释放。${NC}"
   fi
   
-  if [ -n "$DETECTED_PM2_NAME" ]; then
-    echo -e "${GREEN}正在重新启动 PM2 进程 $DETECTED_PM2_NAME 并保存...${NC}"
-    pm2 start "$DETECTED_PM2_NAME"
+  if [ -n "$DETECTED_PM2_ID" ]; then
+    echo -e "${GREEN}检测到当前目录 PM2 进程: $DETECTED_PM2_NAME (id: $DETECTED_PM2_ID)，正在执行真正重启...${NC}"
+    if ! pm2 restart "$DETECTED_PM2_ID" --update-env; then
+      echo -e "${RED}PM2 重启失败，更新已终止。${NC}"
+      exit 1
+    fi
     pm2 save
   else
     if pm2 describe bittensor-arbitrage-bot >/dev/null 2>&1; then
-      echo -e "${YELLOW}检测到已有名为 bittensor-arbitrage-bot 的标准 PM2 进程，正在重新启动并保存...${NC}"
-      pm2 start bittensor-arbitrage-bot
+      echo -e "${YELLOW}检测到已有名为 bittensor-arbitrage-bot 的标准 PM2 进程，正在执行真正重启...${NC}"
+      if ! pm2 restart bittensor-arbitrage-bot --update-env; then
+        echo -e "${RED}PM2 重启失败，更新已终止。${NC}"
+        exit 1
+      fi
     else
       echo -e "${BLUE}正在创建并启动新 PM2 进程 'bittensor-arbitrage-bot'...${NC}"
-      pm2 start server.js --name bittensor-arbitrage-bot
+      if ! pm2 start server.js --name bittensor-arbitrage-bot; then
+        echo -e "${RED}PM2 启动失败，更新已终止。${NC}"
+        exit 1
+      fi
     fi
     pm2 save
   fi
