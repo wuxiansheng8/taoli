@@ -31,25 +31,36 @@ echo ""
 # 2. 检查更新源并更新代码
 echo -e "${YELLOW}>>> [第二步] 正在应用代码更新...${NC}"
 if [ -d ".git" ]; then
-  echo -e "${BLUE}检测到 Git 仓库，正在从 Git 远程仓库拉取最新代码...${NC}"
+  echo -e "${BLUE}检测到 Git 仓库，正在获取远程最新版本...${NC}"
   git fetch --all
   
   # Check for uncommitted changes
   HAS_CHANGES=$(git status --porcelain)
   if [ -n "$HAS_CHANGES" ]; then
-    echo -e "${YELLOW}检测到本地代码已被修改，正在暂存本地更改以防冲突...${NC}"
-    git stash
-  fi
-  
-  if git pull; then
-    echo -e "${GREEN}代码拉取成功！${NC}"
+    echo -e "${YELLOW}检测到本地文件已被修改（您的钱包数据和配置在 data 目录中，已被 git 忽略，安全不会丢失）。${NC}"
+    echo -n -e "${CYAN}是否强制清除本地修改并更新到最新版？(输入 y 强制覆盖并更新，输入其他键尝试保留修改升级) [y/N]: ${NC}"
+    read -r FORCE_UPDATE
+    if [ "$FORCE_UPDATE" = "y" ] || [ "$FORCE_UPDATE" = "Y" ]; then
+      echo -e "${BLUE}正在执行强制更新 (git reset --hard)...${NC}"
+      git reset --hard origin/$(git branch --show-current 2>/dev/null || echo "main")
+      echo -e "${GREEN}本地修改已清理，代码已重置到最新版本！${NC}"
+    else
+      echo -e "${YELLOW}正在尝试暂存本地更改以防冲突...${NC}"
+      git stash
+      if git pull; then
+        echo -e "${GREEN}代码拉取成功！${NC}"
+      else
+        echo -e "${RED}Git 拉取失败，请检查网络或冲突！${NC}"
+      fi
+      echo -e "${BLUE}正在尝试恢复您的本地修改...${NC}"
+      git stash pop || echo -e "${RED}恢复本地修改失败，存在冲突，请手动解决或重新运行本脚本选择强制覆盖。${NC}"
+    fi
   else
-    echo -e "${RED}Git 拉取失败，请检查网络或冲突！${NC}"
-  fi
-  
-  if [ -n "$HAS_CHANGES" ]; then
-    echo -e "${BLUE}正在恢复您的本地代码修改...${NC}"
-    git stash pop
+    if git pull; then
+      echo -e "${GREEN}代码拉取成功！${NC}"
+    else
+      echo -e "${RED}Git 拉取失败，请检查网络或冲突！${NC}"
+    fi
   fi
 else
   echo -e "${YELLOW}当前不是 Git 仓库。如果您是从压缩包或手动更新：${NC}"
