@@ -93,14 +93,75 @@ echo ""
 # 6. 重启 PM2 守护进程
 echo -e "${YELLOW}>>> [第六步] 正在重启机器人进程守护服务...${NC}"
 if command -v pm2 &> /dev/null; then
-  if pm2 describe bittensor-arbitrage-bot &> /dev/null; then
-    pm2 restart bittensor-arbitrage-bot
-    echo -e "${GREEN}PM2 守护进程 bittensor-arbitrage-bot 重启成功！${NC}"
+  # 动态检测当前工作目录下已注册的 PM2 进程名
+  export CURRENT_DIR=$(pwd)
+  DETECTED_PM2_NAME=$(node -e "
+  const execSync = require('child_process').execSync;
+  const path = require('path');
+  try {
+    const list = JSON.parse(execSync('pm2 jlist').toString());
+    const match = list.find(p => {
+      const env = p.pm2_env || {};
+      const cwd = env.pm_cwd || env.cwd;
+      return cwd && path.resolve(cwd) === path.resolve(process.env.CURRENT_DIR);
+    });
+    if (match) console.log(match.name);
+  } catch (e) {}
+  " 2>/dev/null)
+
+  if [ -n "$DETECTED_PM2_NAME" ]; then
+    echo -e "${GREEN}检测到当前目录下已注册的 PM2 进程名: $DETECTED_PM2_NAME，正在直接重启进程以保留原 PM2 配置...${NC}"
+    pm2 restart "$DETECTED_PM2_NAME"
+    pm2 save
   else
-    echo -e "${BLUE}未发现正在运行的 PM2 守护进程，正在启动新进程...${NC}"
-    pm2 start server.js --name bittensor-arbitrage-bot
+    # 如果没有在当前目录检测到 PM2 进程，但可能端口被占用了，主动检查并释放端口，防止启动失败
+    PORT=$(node -e "
+    const fs = require('fs');
+    try {
+      const cfg = JSON.parse(fs.readFileSync('data/settings.json', 'utf8'));
+      console.log(cfg.webPort || 8080);
+    } catch(e) { console.log(8080); }
+    " 2>/dev/null)
+    
+    if command -v lsof >/dev/null 2>&1; then
+      PIDS=$(lsof -tiTCP:$PORT -sTCP:LISTEN || true)
+
+      if [ -n "$PIDS" ]; then
+        echo -e "${YELLOW}检测到端口 $PORT 被以下进程占用：${NC}"
+        lsof -iTCP:$PORT -sTCP:LISTEN || true
+
+        for PID in $PIDS; do
+          CMD=$(ps -p "$PID" -o comm= 2>/dev/null || true)
+          ARGS=$(ps -p "$PID" -o args= 2>/dev/null || true)
+
+          if echo "$ARGS" | grep -q "server.js"; then
+            echo -e "${YELLOW}检测到疑似旧机器人进程 PID=$PID，先尝试正常结束...${NC}"
+            kill "$PID" 2>/dev/null || true
+            sleep 2
+
+            if kill -0 "$PID" 2>/dev/null; then
+              echo -e "${RED}进程仍未退出，强制结束 PID=$PID...${NC}"
+              kill -9 "$PID" 2>/dev/null || true
+            fi
+          else
+            echo -e "${BLUE}端口占用进程不是 server.js，跳过强杀：PID=$PID CMD=$CMD${NC}"
+          fi
+        done
+      fi
+    else
+      echo -e "${YELLOW}未安装 lsof，跳过端口占用自动释放。${NC}"
+    fi
+    
+    if pm2 describe bittensor-arbitrage-bot >/dev/null 2>&1; then
+      echo -e "${YELLOW}检测到已有名为 bittensor-arbitrage-bot 的标准 PM2 进程，正在重启它...${NC}"
+      pm2 restart bittensor-arbitrage-bot
+    else
+      echo -e "${BLUE}正在创建并启动新 PM2 进程 'bittensor-arbitrage-bot'...${NC}"
+      pm2 start server.js --name bittensor-arbitrage-bot
+    fi
     pm2 save
   fi
+  echo -e "${GREEN}PM2 进程守护服务重启并重载成功！${NC}"
 else
   echo -e "${YELLOW}未检测到 pm2 环境，如果您是在前台运行，请手动重启 node 进程。${NC}"
 fi

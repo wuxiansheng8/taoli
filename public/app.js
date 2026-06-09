@@ -181,10 +181,13 @@ function appendLogLine(logEntry, customClass = '') {
   line.appendChild(tagSpan);
   line.appendChild(msgText);
   
-  consoleEl.appendChild(line);
+  // Prepend to display latest logs at the top
+  consoleEl.prepend(line);
   
-  // Keep scrolling to bottom
-  consoleEl.scrollTop = consoleEl.scrollHeight;
+  // Keep the DOM lightweight by capping log lines
+  while (consoleEl.children.length > 2000) {
+    consoleEl.removeChild(consoleEl.lastChild);
+  }
 }
 
 // Load Logs History from backend
