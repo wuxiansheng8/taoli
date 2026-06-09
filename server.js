@@ -192,21 +192,31 @@ app.post('/api/wallets', requireAuth, async (req, res) => {
   
   const result = database.addWallet(name, keyType, secret, address);
   if (result.success) {
-    // Refresh wallets state inside bot
-    await bot.refreshAllWallets();
+    // Reload wallets dynamically inside bot
+    try {
+      await bot.reloadWallets();
+    } catch (err) {
+      console.error('Failed to hot-reload wallets in memory:', err.message);
+    }
     res.json({ success: true });
   } else {
     res.status(400).json({ success: false, error: result.message });
   }
 });
 
-app.delete('/api/wallets', requireAuth, (req, res) => {
+app.delete('/api/wallets', requireAuth, async (req, res) => {
   const { name } = req.body;
   if (!name) {
     return res.status(400).json({ error: '钱包名称不能为空' });
   }
   const result = database.deleteWallet(name);
   if (result.success) {
+    // Reload wallets dynamically inside bot
+    try {
+      await bot.reloadWallets();
+    } catch (err) {
+      console.error('Failed to hot-reload wallets in memory:', err.message);
+    }
     res.json({ success: true });
   } else {
     res.status(400).json({ success: false, error: result.message });
@@ -243,13 +253,11 @@ app.post('/api/bot/stop', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
-app.post('/api/bot/restart', requireAuth, (req, res) => {
+app.post('/api/wallets/reload', requireAuth, async (req, res) => {
   try {
-    bot.stopBot();
-    setTimeout(() => {
-      bot.startBot();
-      res.json({ success: true });
-    }, 1000);
+    await bot.reloadWallets();
+    const list = bot.getWalletsStatus();
+    res.json({ success: true, wallets: list });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

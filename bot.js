@@ -393,6 +393,32 @@ async function refreshAllWallets() {
   }
   return getWalletsStatus();
 }
+// Reload wallets from database into memory dynamically
+async function reloadWallets() {
+  await cryptoWaitReady();
+  keyring = new Keyring({ type: 'sr25519' });
+  
+  log('INFO', '正在重新加载数据库中的钱包至内存中...');
+  const localWallets = database.getWallets(true); // Decrypted secrets
+  const newWallets = [];
+  
+  for (const w of localWallets) {
+    try {
+      const pair = keyring.addFromUri(w.secret.trim());
+      newWallets.push({
+        name: w.name,
+        pair: pair,
+        enabled: true
+      });
+      log('INFO', `重新加载小号钱包: ${w.name} (${pair.address.slice(0, 8)}...${pair.address.slice(-6)})`);
+    } catch (e) {
+      log('ERROR', `重新加载钱包 ${w.name} 私钥失败: ${e.message}`);
+    }
+  }
+  
+  wallets = newWallets;
+  await refreshAllWallets();
+}
 
 function getWalletsStatus() {
   const list = database.getWallets(false);
@@ -565,27 +591,59 @@ function parseExtrinsic(ext) {
 
 // Compute next subnet to prune based on Yuma Consensus rules
 async function getNextPruneCandidate(currentBlock) {
-  // 优先尝试使用 subtensor 官方的 runtime API getSubnetToPrune (仅需1次 RPC 请求)
+  let pruneNetuidVal = null;
+  
+  // 路径 A: 尝试 Runtime API 路径
   try {
     if (api.call.subnetInfoRuntimeApi && api.call.subnetInfoRuntimeApi.getSubnetToPrune) {
-      const pruneNetuidVal = await api.call.subnetInfoRuntimeApi.getSubnetToPrune();
-      if (pruneNetuidVal !== undefined && pruneNetuidVal !== null) {
-        let pruneNetuid;
-        if (typeof pruneNetuidVal.isSome === 'boolean') {
-          if (pruneNetuidVal.isSome) {
-            pruneNetuid = Number(pruneNetuidVal.unwrap().toString());
-          }
-        } else {
-          pruneNetuid = Number(pruneNetuidVal.toString());
-        }
-        if (pruneNetuid !== undefined && !isNaN(pruneNetuid)) {
-          log('INFO', `[子网注销候选] 通过 SubnetInfoRuntimeApi 运行时 API 直接查询成功，目标 netuid: #${pruneNetuid}`);
-          return pruneNetuid;
-        }
-      }
+      pruneNetuidVal = await api.call.subnetInfoRuntimeApi.getSubnetToPrune();
     }
   } catch (err) {
-    log('WARN', `通过 SubnetInfoRuntimeApi.getSubnetToPrune 获取待注销子网失败: ${err.message}，已安全降级至批量多包计算`);
+    log('WARN', `通过 SubnetInfoRuntimeApi 运行时 API 查询失败: ${err.message}，将尝试其它路径...`);
+  }
+
+  // 路径 B: 原始底层 JSON-RPC 调用 (直接向 Web Provider 发送 raw 请求，最稳妥)
+  if (pruneNetuidVal === null) {
+    try {
+      const providerInstance = api.rpc.provider || (api._rpcCore && api._rpcCore.provider);
+      if (providerInstance && typeof providerInstance.send === 'function') {
+        pruneNetuidVal = await providerInstance.send('subnetInfo_getSubnetToPrune', [null]);
+      }
+    } catch (err) {
+      log('WARN', `通过 WsProvider 原始 JSON-RPC (subnetInfo_getSubnetToPrune) 查询失败: ${err.message}，将尝试其它路径...`);
+    }
+  }
+
+  // 路径 C: 自定义 JSON-RPC 映射路径 (作为备用，传入 null 对齐)
+  if (pruneNetuidVal === null) {
+    try {
+      if (api.rpc.subnetInfo && api.rpc.subnetInfo.getSubnetToPrune) {
+        pruneNetuidVal = await api.rpc.subnetInfo.getSubnetToPrune(null);
+      }
+    } catch (err) {
+      log('WARN', `通过 api.rpc.subnetInfo 自定义 RPC 映射查询失败: ${err.message}`);
+    }
+  }
+
+  // 如果任何一条路径成功获取到值，尝试解析
+  if (pruneNetuidVal !== undefined && pruneNetuidVal !== null) {
+    try {
+      let pruneNetuid;
+      if (typeof pruneNetuidVal.isSome === 'boolean') {
+        if (pruneNetuidVal.isSome) {
+          pruneNetuid = Number(pruneNetuidVal.unwrap().toString());
+        }
+      } else {
+        const valStr = pruneNetuidVal.toString();
+        pruneNetuid = valStr.startsWith('0x') ? parseInt(valStr, 16) : Number(valStr);
+      }
+      if (pruneNetuid !== undefined && !isNaN(pruneNetuid)) {
+        log('INFO', `[子网注销候选] 通过 SubnetInfo 接口直接查询成功，目标 netuid: #${pruneNetuid}`);
+        return pruneNetuid;
+      }
+    } catch (decodeErr) {
+      log('WARN', `解析待注销子网返回值失败: ${decodeErr.message}，将降级至批量多包计算`);
+    }
   }
 
   // 降级使用批量多包并发查询进行本地 Yuma 规则计算
@@ -1424,28 +1482,8 @@ async function connectWs(reason = 'Normal Boot') {
     log('WARN', `[注意] 本地交易池监听接口测试失败: "${errMsg}"。如果该节点是你的交易网关，请确保节点启动命令配置了 --rpc-methods=Unsafe，否则机器人将无法监听 Pending 交易！`);
   }
 
-  // Load wallets keypairs
-  await cryptoWaitReady();
-  keyring = new Keyring({ type: 'sr25519' });
-  wallets = [];
-  
-  const localWallets = database.getWallets(true); // Decrypted secrets
-  for (const w of localWallets) {
-    try {
-      const pair = keyring.addFromUri(w.secret);
-      wallets.push({
-        name: w.name,
-        pair: pair,
-        enabled: true
-      });
-      log('INFO', `加载小号钱包: ${w.name} (${pair.address.slice(0, 8)}...${pair.address.slice(-6)})`);
-    } catch (e) {
-      log('ERROR', `加载钱包 ${w.name} 私钥失败: ${e.message}`);
-    }
-  }
-
-  // Pre-load nonces & balances
-  await refreshAllWallets();
+  // Load wallets keypairs dynamically
+  await reloadWallets();
   // Initialize subnet owners cache
   await refreshSubnetOwnersCache();
 
@@ -1567,6 +1605,7 @@ module.exports = {
   testTelegram,
   testApiUrl,
   refreshAllWallets,
+  reloadWallets,
   getWalletsStatus,
   getUptimeSeconds,
   getLogs: () => logs,

@@ -478,24 +478,24 @@ document.getElementById('btn-refresh-balances').onclick = async () => {
   }
 };
 
-// Restart bot on wallet page click
-document.getElementById('btn-restart-bot-wallets').onclick = async () => {
-  const btn = document.getElementById('btn-restart-bot-wallets');
+// Reload wallets on wallet page click
+document.getElementById('btn-reload-wallets').onclick = async () => {
+  const btn = document.getElementById('btn-reload-wallets');
   btn.disabled = true;
-  btn.innerText = '正在重启应用...';
+  btn.innerText = '正在重新加载...';
   try {
-    const res = await apiFetch('/api/bot/restart', { method: 'POST' });
+    const res = await apiFetch('/api/wallets/reload', { method: 'POST' });
     if (res.success) {
-      alert('一键重启成功，钱包已重新加载并完成初始化！');
-      refreshWallets();
+      alert('内存钱包重新加载并同步成功！');
+      renderWallets(res.wallets);
     } else {
-      alert('重启失败: ' + res.error);
+      alert('重新加载失败: ' + res.error);
     }
   } catch (e) {
-    alert('重启请求出错: ' + e.message);
+    alert('重新加载请求出错: ' + e.message);
   } finally {
     btn.disabled = false;
-    btn.innerText = '一键重启应用钱包';
+    btn.innerText = '重新加载内存钱包';
   }
 };
 
