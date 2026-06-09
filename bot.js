@@ -19,6 +19,7 @@ let latencyTimer = null;
 let isPolling = false;
 let wallets = [];
 let keyring = null;
+let lastMempoolErrorTime = 0; // added for throttled error logging
 
 // Mempool maps for deduplication and nonce tracking
 const seenHashes = new Map();
@@ -225,7 +226,7 @@ async function refreshSubnetOwnersCache() {
       }
     }
   } catch (e) {
-    // Silent background fail
+    log('WARN', `[缓存同步] 自动同步子网 Owner 缓存失败: ${e.message}`);
   }
 }
 
@@ -469,6 +470,13 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
       // Sign the transaction asynchronously
       await tx.signAsync(pair, options);
       const signedTxHex = tx.toHex();
+
+      const callDetails = `${tx.method.section}.${tx.method.method}`;
+      let callArgs = 'unknown';
+      try {
+        callArgs = JSON.stringify(tx.method.toHuman().args);
+      } catch (argsErr) {}
+      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails}，参数: ${callArgs}，Nonce: ${reservedNonce}，Tip: ${tip} TAO`);
 
       // Parallel broadcast to all connected broadcast nodes
       broadcastSignedTx(signedTxHex);
@@ -901,7 +909,9 @@ async function resolveHotkey(netuid) {
         return hk;
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    log('WARN', `[解析Hotkey] 通过 subnetOwnerHotkey 查询子网 #${netuid} 失败: ${e.message}`);
+  }
 
   try {
     const uids = [0, 1, 2, 3, 4, 5];
@@ -915,7 +925,9 @@ async function resolveHotkey(netuid) {
         }
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    log('WARN', `[解析Hotkey] 通过 keys.multi 查询子网 #${netuid} 失败: ${e.message}`);
+  }
   
   try {
     const owner = await api.query.subtensorModule.subnetOwner(netuid);
@@ -926,7 +938,9 @@ async function resolveHotkey(netuid) {
         return ownerStr;
       }
     }
-  } catch (e) {}
+  } catch (e) {
+    log('WARN', `[解析Hotkey] 通过 subnetOwner 查询子网 #${netuid} 失败: ${e.message}`);
+  }
   
   return null;
 }
@@ -1232,7 +1246,16 @@ async function poll() {
 
     maxRegisterNetworkTip = currentMaxRegisterTip;
   } catch (e) {
-    // Silent error
+    const now = Date.now();
+    if (now - lastMempoolErrorTime > 60000) { // Log once per minute to prevent flooding
+      lastMempoolErrorTime = now;
+      const errMsg = e.message || String(e);
+      if (errMsg.includes('unsafe') || errMsg.includes('Method not found') || errMsg.includes('reject') || errMsg.includes('forbidden') || errMsg.includes('unauthorized')) {
+        log('ERROR', `[交易池监听失败] 节点拒绝了 pendingExtrinsics 请求！原因: "${errMsg}"。极大概率是因为本地节点未启用 Unsafe RPC 方法。请确保 Subtensor 节点配置了 --rpc-methods=Unsafe !`);
+      } else {
+        log('WARN', `获取交易池 Pending 交易失败: ${errMsg}`);
+      }
+    }
   } finally {
     isPolling = false;
   }
@@ -1304,6 +1327,15 @@ async function connectWs(reason = 'Normal Boot') {
   botStatus = 'Running';
   if (!systemUptimeStart) systemUptimeStart = Date.now();
 
+  // Test if unsafe RPC is enabled (required for mempool scanning)
+  try {
+    await api.rpc.author.pendingExtrinsics();
+    log('SUCCESS', '本地交易池 (Mempool) 监听接口测试成功：Unsafe RPC 已启用！');
+  } catch (err) {
+    const errMsg = err.message || String(err);
+    log('WARN', `[注意] 本地交易池监听接口测试失败: "${errMsg}"。如果该节点是你的交易网关，请确保节点启动命令配置了 --rpc-methods=Unsafe，否则机器人将无法监听 Pending 交易！`);
+  }
+
   // Load wallets keypairs
   await cryptoWaitReady();
   keyring = new Keyring({ type: 'sr25519' });
@@ -1373,14 +1405,19 @@ async function connectWs(reason = 'Normal Boot') {
   // Start Latency loop
   if (latencyTimer) clearInterval(latencyTimer);
   latencyTimer = setInterval(async () => {
-    if (!api || !api.isConnected) return;
+    if (!api || !api.isConnected) {
+      log('WARN', '检测到 API 节点连接断开，正在尝试自动重连...');
+      stopBot();
+      connectWs('Connection Dropped');
+      return;
+    }
     const start = Date.now();
     try {
       await api.rpc.system.health();
       currentLatency = Date.now() - start;
     } catch (e) {
       currentLatency = -1;
-      log('WARN', 'API 节点通信无响应，尝试重连...');
+      log('WARN', `API 节点通信无响应 (心跳超时): ${e.message}，尝试重连...`);
       stopBot();
       connectWs('Heartbeat Timeout');
     }
