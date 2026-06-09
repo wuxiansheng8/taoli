@@ -934,7 +934,7 @@ async function handlePendingExtrinsic(parsed) {
         
         const targetHotkey = await resolveHotkey(netuid);
         if (targetHotkey) {
-          executeArbitrageStake(netuid, targetHotkey, settings.dashingAmount, settings.renameTip, '改名抢跑', settings.renameSlippageLimit);
+          executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, settings.renameTip, '改名抢跑', settings.renameSlippageLimit);
         } else {
           log('WARN', `[改名抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
         }
@@ -968,7 +968,7 @@ async function handlePendingExtrinsic(parsed) {
               log('INFO', `[冷键交换抢跑] 匹配到目标受控子网 #${netuid}，立即执行抢跑！`);
               const targetHotkey = await resolveHotkey(netuid);
               if (targetHotkey) {
-                executeArbitrageStake(netuid, targetHotkey, settings.dashingAmount, settings.swapTip, '冷键交换抢跑', settings.swapSlippageLimit);
+                executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, settings.swapTip, '冷键交换抢跑', settings.swapSlippageLimit);
               } else {
                 log('WARN', `[冷键交换抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
               }
@@ -1029,13 +1029,13 @@ async function handlePendingExtrinsic(parsed) {
             }
           }
 
-          const buySuccess = await executeSandwichBuy(netuid, hotkey, settings.dashingAmount, settings.sandwichTip, calculatedSlippage);
+          const buySuccess = await executeSandwichBuy(netuid, hotkey, settings.sandwichAmount, settings.sandwichTip, calculatedSlippage);
           if (buySuccess && settings.sandwichAutoSell) {
             log('INFO', `[三明治套利] 成功执行前置买入，已登记后置卖出，将在下一个区块头确认时自动发起售出...`);
             pendingSandwichSell = {
               netuid,
               hotkey,
-              amount: settings.dashingAmount,
+              amount: settings.sandwichAmount,
               tip: settings.sandwichSellTip
             };
           }
@@ -1102,39 +1102,118 @@ async function resolveHotkey(netuid, force = false) {
 // Execute normal staking arbitrage
 // Execute normal staking arbitrage
 async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slippageLimit) {
+  const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
   if (activeWallets.length === 0) {
     log('WARN', `[${label}] 触发抢跑，但没有加载启用任何小号钱包！`);
     return;
   }
 
+  // 根据策略类型提取对应的配置参数，默认回退安全值
+  let burstCount = 1;
+  let retries = 1;
+  let interval = 1000;
+  let timeoutMs = 30000;
+  let timeoutRetries = 0;
+
+  if (label === '改名抢跑') {
+    burstCount = Math.max(1, settings.renameBurstCount || 1);
+    retries = Math.max(1, settings.renameRetries || 1);
+    interval = Math.max(50, settings.renameIntervalMs || 1000);
+    timeoutMs = Math.max(1000, settings.renameTimeoutMs || 30000);
+    timeoutRetries = Math.max(0, settings.renameTimeoutRetries || 0);
+  } else if (label === '冷键交换抢跑') {
+    burstCount = Math.max(1, settings.swapBurstCount || 1);
+    retries = Math.max(1, settings.swapRetries || 1);
+    interval = Math.max(50, settings.swapIntervalMs || 1000);
+    timeoutMs = Math.max(1000, settings.swapTimeoutMs || 30000);
+    timeoutRetries = Math.max(0, settings.swapTimeoutRetries || 0);
+  }
+
+  const successKey = `${label}:${netuid}:${hotkey}`;
+  const lockKey = `lock:${label}:${netuid}`;
+
+  // 1. 防重复运行锁
+  if (activeSnipesByNetuid.has(lockKey)) {
+    log('INFO', `[${label}] 子网 #${netuid} 抢跑循环已经在运行中，跳过重复触发。`);
+    return;
+  }
+
+  // 2. 成功状态校验
+  if (dashingSuccessByNetuid.get(successKey) === true) {
+    log('INFO', `[${label}] 检测到子网 #${netuid} 之前已抢跑成功，跳过执行。`);
+    return;
+  }
+
+  // 加锁并初始化成功状态
+  activeSnipesByNetuid.add(lockKey);
+  if (dashingSuccessByNetuid.get(successKey) === undefined) {
+    dashingSuccessByNetuid.set(successKey, false);
+  }
+
   const targetTip = calculateDynamicTip(netuid, tip);
-  log('INFO', `[${label}] 启动 ${activeWallets.length} 个钱包执行购买，基准金额: ${amountTao} TAO, 最终小费: ${targetTip} TAO`);
-  sendTelegramAlert(`🚀 [${label} 触发]\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n执行钱包数: ${activeWallets.length}`);
+  log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
+  sendTelegramAlert(`🚀 [${label} 触发]\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
 
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
-  
-  for (const w of activeWallets) {
-    try {
-      const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
-      log('INFO', `[${label}] 钱包【${w.name}】发起交易...`);
-      sendTx(tx, w.pair, 10000, targetTip, {
-        netuid,
-        hotkey,
-        amountBigInt,
-        slippageLimit,
-        label
-      }).then(res => {
-        if (res.success) {
-          log('SUCCESS', `[${label} 成功] 钱包【${w.name}】购买成功！Hash: ${res.hash}`);
-          sendTelegramAlert(`✅ [${label} 成功]\n钱包: ${w.name}\n子网: #${netuid}\n交易哈希: ${res.hash}`);
-        } else {
-          log('ERROR', `[${label} 失败] 钱包【${w.name}】交易失败: ${res.error}`);
-          sendTelegramAlert(`❌ [${label} 失败]\n钱包: ${w.name}\n子网: #${netuid}\n原因: ${res.error}`);
+  const txPromises = [];
+
+  try {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      if (attempt > 0 && dashingSuccessByNetuid.get(successKey)) {
+        log('INFO', `[${label}] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮扫射。`);
+        break;
+      }
+
+      log('INFO', `[${label}] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
+
+      for (const w of activeWallets) {
+        for (let i = 0; i < burstCount; i++) {
+          try {
+            const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
+            log('INFO', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
+
+            const p = sendTx(tx, w.pair, timeoutMs, targetTip, {
+              netuid,
+              hotkey,
+              amountBigInt,
+              slippageLimit,
+              label: `${label}-轮次${attempt + 1}-并发#${i + 1}`
+            }).then(res => {
+              if (res.success) {
+                log('SUCCESS', `[${label} 成功] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
+                dashingSuccessByNetuid.set(successKey, true);
+                sendTelegramAlert(`✅ [${label} 成功]\n钱包: ${w.name}\n子网: #${netuid}\n交易哈希: ${res.hash}`);
+                return res;
+              } else {
+                log('ERROR', `[${label} 失败] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
+                if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && timeoutRetries > 0) {
+                  return executeTimeoutRetry(w, netuid, hotkey, 1, timeoutRetries, timeoutMs, amountTao, slippageLimit, tip, label);
+                }
+                return res;
+              }
+            });
+            txPromises.push(p);
+          } catch (e) {
+            log('ERROR', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易抛出异常: ${e.message}`);
+          }
         }
-      });
-    } catch (e) {
-      log('ERROR', `[${label}] 钱包【${w.name}】交易抛出异常: ${e.message}`);
+      }
+
+      if (attempt < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, interval));
+      }
+    }
+  } finally {
+    const unlock = () => {
+      activeSnipesByNetuid.delete(lockKey);
+    };
+
+    if (txPromises.length > 0) {
+      Promise.allSettled(txPromises).finally(unlock);
+      setTimeout(unlock, 180000); // 3-minute safety release
+    } else {
+      setTimeout(unlock, Math.max(3000, interval));
     }
   }
 }
@@ -1220,49 +1299,57 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
 }
 
 // Helper for timeout retries
-async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum) {
+async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeoutRetries = null, customTimeoutMs = null, customAmount = null, customSlippageLimit = null, customTip = null, label = '新子网打新') {
   const settings = database.getSettings();
-  const maxTimeoutRetries = settings.dashingTimeoutRetries || 0;
-  if (attemptNum > maxTimeoutRetries) return { success: false, error: 'Max timeout retries reached' };
+  const actualMaxRetries = maxTimeoutRetries !== null ? maxTimeoutRetries : (settings.dashingTimeoutRetries || 0);
+  if (attemptNum > actualMaxRetries) return { success: false, error: 'Max timeout retries reached' };
   
-  const successKey = `${netuid}:${targetHotkey}`;
+  const successKey = `${label}:${netuid}:${targetHotkey}`;
   if (dashingSuccessByNetuid.get(successKey)) return { success: true };
   
   // Prevent duplicate concurrent timeout retries for the same wallet
-  const key = `${netuid}:${targetHotkey}:${w.name}`;
+  const key = `${label}:${netuid}:${targetHotkey}:${w.name}`;
   const currentActive = activeTimeoutRetryNumByWallet.get(key) || 0;
   if (attemptNum <= currentActive) return { success: false, error: 'Duplicate retry' };
   activeTimeoutRetryNumByWallet.set(key, attemptNum);
   
-  log('WARN', `[新子网打新] 钱包【${w.name}】交易超时。触发第 ${attemptNum}/${maxTimeoutRetries} 次超时重试...`);
+  log('WARN', `[${label}] 钱包【${w.name}】交易超时。触发第 ${attemptNum}/${actualMaxRetries} 次超时重试...`);
   
   // Wait 1 second before retrying to ensure the nonce query inside sendTx timeout handler completed
   await new Promise(resolve => setTimeout(resolve, 1000));
   
   if (dashingSuccessByNetuid.get(successKey)) return { success: true };
   
+  const actualAmount = customAmount !== null ? customAmount : settings.dashingAmount;
+  const actualSlippageLimit = customSlippageLimit !== null ? customSlippageLimit : settings.dashingSlippageLimit;
+  const actualTip = customTip !== null ? customTip : settings.dashingTip;
+  const actualTimeoutMs = customTimeoutMs !== null ? customTimeoutMs : (settings.dashingTimeoutMs || 30000);
+  
   try {
-    const targetTip = calculateDynamicTip(netuid, settings.dashingTip);
-    const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
-    const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, settings.dashingSlippageLimit);
+    const targetTip = calculateDynamicTip(netuid, actualTip);
+    const amountBigInt = BigInt(Math.floor(actualAmount * 1e9));
+    const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit);
     
     const p = new Promise((resolve) => {
-      sendTx(tx, w.pair, settings.dashingTimeoutMs, targetTip, {
+      sendTx(tx, w.pair, actualTimeoutMs, targetTip, {
         netuid,
         hotkey: targetHotkey,
         amountBigInt,
-        slippageLimit: settings.dashingSlippageLimit,
-        label: `新子网打新-超时重试#${attemptNum}`
+        slippageLimit: actualSlippageLimit,
+        label: `${label}-超时重试#${attemptNum}`
       }).then(res => {
         if (res.success) {
-          log('SUCCESS', `[新子网打新] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！Hash: ${res.hash}`);
+          log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！Hash: ${res.hash}`);
           dashingSuccessByNetuid.set(successKey, true);
-          sendTelegramAlert(`✅ [新子网打新 超时重试成功]\n钱包: ${w.name}\n子网: #${netuid}\n重试次数: ${attemptNum}\n交易哈希: ${res.hash}`);
+          if (label === '新子网打新') {
+            pendingNewSubnet = null; // 清除内存兜底，防重复触发
+          }
+          sendTelegramAlert(`✅ [${label} 超时重试成功]\n钱包: ${w.name}\n子网: #${netuid}\n重试次数: ${attemptNum}\n交易哈希: ${res.hash}`);
           resolve(res);
         } else {
-          log('ERROR', `[新子网打新] 超时重试 #${attemptNum} - 钱包【${w.name}】交易失败: ${res.error}`);
+          log('ERROR', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】交易失败: ${res.error}`);
           if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout'))) {
-            executeTimeoutRetry(w, netuid, targetHotkey, attemptNum + 1).then(resolve);
+            executeTimeoutRetry(w, netuid, targetHotkey, attemptNum + 1, actualMaxRetries, actualTimeoutMs, actualAmount, actualSlippageLimit, actualTip, label).then(resolve);
           } else {
             resolve(res);
           }
@@ -1278,7 +1365,7 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum) {
 
     return p;
   } catch (e) {
-    log('ERROR', `[新子网打新] 超时重试 #${attemptNum} - 钱包【${w.name}】发起异常: ${e.message}`);
+    log('ERROR', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】发起异常: ${e.message}`);
     if (attemptNum === 1) {
       activeTimeoutRetryNumByWallet.delete(key);
     }
@@ -1313,7 +1400,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     return;
   }
 
-  const successKey = `${netuid}:${targetHotkey}`;
+  const successKey = `新子网打新:${netuid}:${targetHotkey}`;
   
   // 2. 成功状态校验：若之前已有该子网的成功购买记录，直接拦截退出，防止重复买入
   if (dashingSuccessByNetuid.get(successKey) === true) {
@@ -1336,18 +1423,18 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
 
-  log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 重试轮数: ${retries}, 间隔: ${interval}ms`);
-  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n每轮并发数: ${burstCount}\n最大重试: ${retries}轮\n重试间隔: ${interval}ms`);
+  log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
+  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
 
   try {
     for (let attempt = 0; attempt < retries; attempt++) {
       // 只有在尚未有任何一笔成功购买交易时，才进行新一轮的买入尝试
       if (attempt > 0 && dashingSuccessByNetuid.get(successKey)) {
-        log('INFO', `[新子网打新] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮重试。`);
+        log('INFO', `[新子网打新] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮扫射。`);
         break;
       }
 
-      log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮购买尝试...`);
+      log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
       
       for (const w of activeWallets) {
         for (let i = 0; i < burstCount; i++) {
@@ -1373,7 +1460,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1);
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, settings.dashingSlippageLimit, settings.dashingTip, '新子网打新');
                 }
                 return res;
               }

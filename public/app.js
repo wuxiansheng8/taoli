@@ -310,13 +310,26 @@ async function loadConfig() {
     document.getElementById('strat-dashing-tip').value = cfg.dashingTip;
     
     document.getElementById('strat-rename-enabled').checked = cfg.renameEnabled;
+    document.getElementById('strat-rename-amount').value = cfg.renameAmount !== undefined ? cfg.renameAmount : 100;
     document.getElementById('strat-rename-tip').value = cfg.renameTip;
+    document.getElementById('strat-rename-burst').value = cfg.renameBurstCount !== undefined ? cfg.renameBurstCount : 1;
+    document.getElementById('strat-rename-retries').value = cfg.renameRetries !== undefined ? cfg.renameRetries : 1;
+    document.getElementById('strat-rename-interval').value = cfg.renameIntervalMs !== undefined ? cfg.renameIntervalMs : 1000;
+    document.getElementById('strat-rename-timeout').value = cfg.renameTimeoutMs !== undefined ? cfg.renameTimeoutMs : 30000;
+    document.getElementById('strat-rename-timeout-retries').value = cfg.renameTimeoutRetries !== undefined ? cfg.renameTimeoutRetries : 0;
     
     document.getElementById('strat-swap-enabled').checked = cfg.swapEnabled;
+    document.getElementById('strat-swap-amount').value = cfg.swapAmount !== undefined ? cfg.swapAmount : 100;
     document.getElementById('strat-swap-tip').value = cfg.swapTip;
+    document.getElementById('strat-swap-burst').value = cfg.swapBurstCount !== undefined ? cfg.swapBurstCount : 1;
+    document.getElementById('strat-swap-retries').value = cfg.swapRetries !== undefined ? cfg.swapRetries : 1;
+    document.getElementById('strat-swap-interval').value = cfg.swapIntervalMs !== undefined ? cfg.swapIntervalMs : 1000;
+    document.getElementById('strat-swap-timeout').value = cfg.swapTimeoutMs !== undefined ? cfg.swapTimeoutMs : 30000;
+    document.getElementById('strat-swap-timeout-retries').value = cfg.swapTimeoutRetries !== undefined ? cfg.swapTimeoutRetries : 0;
     
     document.getElementById('strat-sandwich-enabled').checked = cfg.sandwichEnabled;
     document.getElementById('strat-sandwich-threshold').value = cfg.sandwichThreshold;
+    document.getElementById('strat-sandwich-amount').value = cfg.sandwichAmount !== undefined ? cfg.sandwichAmount : 100;
     document.getElementById('strat-sandwich-tip').value = cfg.sandwichTip;
     document.getElementById('strat-sandwich-sell-tip').value = cfg.sandwichSellTip;
     document.getElementById('strat-sandwich-autosell').checked = cfg.sandwichAutoSell;
@@ -364,13 +377,26 @@ async function saveStrategies() {
     dashingTip: Number(document.getElementById('strat-dashing-tip').value),
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,
+    renameAmount: Number(document.getElementById('strat-rename-amount').value || 100),
     renameTip: Number(document.getElementById('strat-rename-tip').value),
+    renameBurstCount: Number(document.getElementById('strat-rename-burst').value || 1),
+    renameRetries: Number(document.getElementById('strat-rename-retries').value || 1),
+    renameIntervalMs: Number(document.getElementById('strat-rename-interval').value || 1000),
+    renameTimeoutMs: Number(document.getElementById('strat-rename-timeout').value || 30000),
+    renameTimeoutRetries: Number(document.getElementById('strat-rename-timeout-retries').value || 0),
     
     swapEnabled: document.getElementById('strat-swap-enabled').checked,
+    swapAmount: Number(document.getElementById('strat-swap-amount').value || 100),
     swapTip: Number(document.getElementById('strat-swap-tip').value),
+    swapBurstCount: Number(document.getElementById('strat-swap-burst').value || 1),
+    swapRetries: Number(document.getElementById('strat-swap-retries').value || 1),
+    swapIntervalMs: Number(document.getElementById('strat-swap-interval').value || 1000),
+    swapTimeoutMs: Number(document.getElementById('strat-swap-timeout').value || 30000),
+    swapTimeoutRetries: Number(document.getElementById('strat-swap-timeout-retries').value || 0),
     
     sandwichEnabled: document.getElementById('strat-sandwich-enabled').checked,
     sandwichThreshold: Number(document.getElementById('strat-sandwich-threshold').value),
+    sandwichAmount: Number(document.getElementById('strat-sandwich-amount').value || 100),
     sandwichTip: Number(document.getElementById('strat-sandwich-tip').value),
     sandwichSellTip: Number(document.getElementById('strat-sandwich-sell-tip').value),
     sandwichAutoSell: document.getElementById('strat-sandwich-autosell').checked,
@@ -389,7 +415,7 @@ async function saveStrategies() {
     // Replace-by-Fee (RBF)
     replaceByFeeEnabled: document.getElementById('cfg-rbf-enabled').checked,
     replaceByFeeMinDelta: document.getElementById('cfg-rbf-delta').value !== '' ? Number(document.getElementById('cfg-rbf-delta').value) : 0.1,
-
+    
     // AMM Dynamic Slippage
     dynamicSlippageEnabled: document.getElementById('cfg-dynamic-slippage-enabled').checked,
     dynamicSlippageSafetyFactor: document.getElementById('cfg-dynamic-slippage-safety-factor').value !== '' ? Number(document.getElementById('cfg-dynamic-slippage-safety-factor').value) : 0.7

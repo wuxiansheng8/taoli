@@ -65,16 +65,29 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,
+  renameAmount: 100,
   renameTip: 2.0,
   renameSlippageLimit: 0.05, // 5% slippage
+  renameRetries: 1,
+  renameIntervalMs: 1000,
+  renameTimeoutMs: 30000,
+  renameBurstCount: 1,
+  renameTimeoutRetries: 0,
   
   // Strategy: Coldkey Swap Frontrun
   swapEnabled: true,
+  swapAmount: 100,
   swapTip: 5.0,
   swapSlippageLimit: 0.05, // 5% slippage
+  swapRetries: 1,
+  swapIntervalMs: 1000,
+  swapTimeoutMs: 30000,
+  swapBurstCount: 1,
+  swapTimeoutRetries: 0,
   
   // Strategy: Big Buy Sandwich Arbitrage
   sandwichEnabled: true,
+  sandwichAmount: 100,
   sandwichThreshold: 100, // TAO threshold for detecting big buy
   sandwichTip: 10.0, // tip for frontrun buy
   sandwichAutoSell: true, // auto sell after victim
