@@ -227,6 +227,7 @@ async function refreshSubnetOwnersCache() {
         subnetRegisteredAtCache.set(netuid, registeredBlock);
       }
     }
+    log('SUCCESS', `[缓存同步] 子网缓存同步成功。已缓存 ${activeNetuids.length} 个子网的 Owner 账户、Hotkey 及注册高度信息。`);
   } catch (e) {
     log('WARN', `[缓存同步] 自动同步子网 Owner 缓存失败: ${e.message}`);
   }
@@ -812,7 +813,7 @@ async function handlePendingExtrinsic(parsed) {
         log('INFO', `[新子网打新] 扫到他人提交注册交易。预测 netuid #${targetNetuid}，提取到新子网目标 hotkey: ${targetHotkey}。立即启动极速 Staking 抢单！`);
         
         // 立即执行极速抢单，并在后台进行重试与并发
-        executeStakingSniping(targetNetuid, targetHotkey).catch(e => {
+        executeStakingSniping(targetNetuid, targetHotkey, 'Mempool').catch(e => {
           log('ERROR', `[新子网打新] 触发极速抢购失败: ${e.message}`);
         });
 
@@ -1229,29 +1230,29 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum) {
 }
 
 // Staking Sniping execution (pure staking buy-in on newly registered subnet)
-async function executeStakingSniping(netuid, hotkey) {
+async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') {
   const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
   if (activeWallets.length === 0) {
-    log('WARN', `[新子网打新] 触发打新抢购，但没有加载启用任何小号钱包！`);
+    log('WARN', `[新子网打新] [触发源: ${triggerSource}] 触发打新抢购，但没有加载启用任何小号钱包！`);
     return;
   }
 
   // 1. 防重复运行锁（基于 netuid）：如果当前子网的打新循环已在运行，直接拦截
   if (activeSnipesByNetuid.has(netuid)) {
-    log('INFO', `[新子网打新] 子网 #${netuid} 打新抢购循环已经在运行中，跳过重复触发。`);
+    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 子网 #${netuid} 打新抢购循环已经在运行中，跳过重复触发。`);
     return;
   }
 
   // 优先用传入的 hotkey（从 pending registerNetwork 中提取的），否则回退使用 resolveHotkey
   let targetHotkey = hotkey;
   if (!targetHotkey) {
-    log('INFO', `[新子网打新] 未提取到 mempool hotkey，启动链上检索...`);
+    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 未提取到 mempool hotkey，启动链上检索...`);
     targetHotkey = await resolveHotkey(netuid);
   }
 
   if (!targetHotkey) {
-    log('WARN', `[新子网打新] 无法为子网 #${netuid} 解析到有效 hotkey，打新抢购取消。`);
+    log('WARN', `[新子网打新] [触发源: ${triggerSource}] 无法为子网 #${netuid} 解析到有效 hotkey，打新抢购取消。`);
     return;
   }
 
@@ -1278,8 +1279,8 @@ async function executeStakingSniping(netuid, hotkey) {
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
 
-  log('INFO', `[新子网打新] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 重试轮数: ${retries}, 间隔: ${interval}ms`);
-  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n每轮并发数: ${burstCount}\n最大重试: ${retries}轮\n重试间隔: ${interval}ms`);
+  log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 重试轮数: ${retries}, 间隔: ${interval}ms`);
+  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n每轮并发数: ${burstCount}\n最大重试: ${retries}轮\n重试间隔: ${interval}ms`);
 
   try {
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -1395,7 +1396,7 @@ async function detectNewSubnetOnChain(blockHeight) {
             subnetRegisteredAtCache.set(netuid, regBlock);
             subnetHotkeysCache.set(netuid, targetHotkey);
             
-            executeStakingSniping(netuid, targetHotkey).catch(e => {
+            executeStakingSniping(netuid, targetHotkey, 'Block-Fallback').catch(e => {
               log('ERROR', `[新子网打新] 触发链上兜底抢跑失败: ${e.message}`);
             });
           } else {
@@ -1568,7 +1569,7 @@ async function connectWs(reason = 'Normal Boot') {
       
       api = await ApiPromise.create({ provider });
       
-      log('SUCCESS', `成功连接至节点: ${url}`);
+      log('SUCCESS', `成功连接至节点: ${url} (链名称: ${api.runtimeChain || 'Subtensor'}, Spec版本: ${api.runtimeVersion?.specVersion || 'unknown'}, 创世哈希: ${api.genesisHash?.toHex().slice(0, 10)}...)`);
       connected = true;
       break;
     } catch (e) {
@@ -1595,23 +1596,30 @@ async function connectWs(reason = 'Normal Boot') {
 
   // Test if unsafe RPC is enabled (required for mempool scanning)
   try {
+    log('INFO', '[API初始化] 正在测试本地节点是否开启 Unsafe RPC 接口 (用于交易池 Pending 交易扫描)...');
     await api.rpc.author.pendingExtrinsics();
     log('SUCCESS', '本地交易池 (Mempool) 监听接口测试成功：Unsafe RPC 已启用！');
   } catch (err) {
     const errMsg = err.message || String(err);
-    log('WARN', `[注意] 本地交易池监听接口测试失败: "${errMsg}"。如果该节点是你的交易网关，请确保节点启动命令配置了 --rpc-methods=Unsafe，否则机器人将无法监听 Pending 交易！`);
+    log('WARN', `[注意] 本地交易池监听接口测试失败: "${errMsg}"。如果该节点 is 你的交易网关，请确保节点启动命令配置了 --rpc-methods=Unsafe，否则机器人将无法监听 Pending 交易！`);
   }
 
   // Load wallets keypairs dynamically
+  log('INFO', '[API初始化] 正在加载本地小号钱包并同步链上 Nonce 与余额...');
   await reloadWallets();
+  
   // Initialize subnet owners cache
+  log('INFO', '[API初始化] 正在批量拉取链上所有活跃子网的注册区块、Owner 和 Hotkey 信息...');
   await refreshSubnetOwnersCache();
 
   // Initialize broadcast nodes and start latency tester
+  log('INFO', '[API初始化] 正在配置多节点广播组件并启动节点延迟测试...');
   initBroadcastNodes();
   if (broadcastLatencyTimer) clearInterval(broadcastLatencyTimer);
   broadcastLatencyTimer = setInterval(testBroadcastNodes, 10000);
   setTimeout(testBroadcastNodes, 2000);
+
+  log('SUCCESS', '[API初始化] 节点连接与全部初始化请求执行完毕！机器人正式进入 RUNNING 状态，已启动区块头 (subscribeNewHeads) 监听！');
 
   // Subscribe to block headers
   api.rpc.chain.subscribeNewHeads(async (header) => {
@@ -1631,7 +1639,7 @@ async function connectWs(reason = 'Normal Boot') {
             log('INFO', `[新子网打新] 区块头 #${currentBlockHeight} 到达。内存子网 #${snipe.netuid} 已有抢购循环在运行中，跳过内存兜底触发。`);
           } else {
             log('SUCCESS', `[新子网打新] 检测到新区块头 #${currentBlockHeight} 到达，立刻对内存中的新子网 #${snipe.netuid} (Hotkey: ${snipe.hotkey}) 执行 Staking 抢购！`);
-            executeStakingSniping(snipe.netuid, snipe.hotkey).catch(e => {
+            executeStakingSniping(snipe.netuid, snipe.hotkey, 'Memory-Fallback').catch(e => {
               log('ERROR', `[新子网打新] 触发内存兜底打新抢购失败: ${e.message}`);
             });
           }
