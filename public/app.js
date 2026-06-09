@@ -4,7 +4,7 @@ let ws = null;
 let uptimeInterval = null;
 let systemUptimeSeconds = 0;
 let clockInterval = null;
-let timeOffset = 0;
+let serverTimestamp = 0;
 
 // API Helper
 async function apiFetch(url, options = {}) {
@@ -32,8 +32,13 @@ function startClock() {
     const clockEl = document.getElementById('clock-beijing');
     if (!clockEl) return;
     
+    // Ticking purely based on server time
+    if (serverTimestamp > 0) {
+      serverTimestamp += 500;
+    }
+    
     // Get Beijing Time (UTC+8) synced with Server Time
-    const d = new Date(Date.now() + timeOffset);
+    const d = new Date(serverTimestamp > 0 ? serverTimestamp : Date.now());
     const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
     const beijing = new Date(utc + (3600000 * 8));
     
@@ -134,7 +139,7 @@ function updateHeaderStatus(data) {
   document.getElementById('sidebar-node').innerText = data.activeNode || '未连接';
 
   if (data.serverTime !== undefined) {
-    timeOffset = data.serverTime - Date.now();
+    serverTimestamp = data.serverTime;
   }
 
   // Render broadcast nodes status table
@@ -672,12 +677,23 @@ async function logout() {
   if (clockInterval) clearInterval(clockInterval);
 }
 
+// Sync Server Time initially to prevent clock flicker
+async function syncServerTime() {
+  try {
+    const data = await apiFetch('/api/status');
+    if (data && data.serverTime) {
+      serverTimestamp = data.serverTime;
+    }
+  } catch (e) {}
+}
+
 // Show Dashboard after login
 function showDashboard() {
   document.getElementById('login-overlay').classList.remove('active');
   document.getElementById('app').classList.add('active');
   document.getElementById('login-form').reset();
   
+  syncServerTime();
   startClock();
   startUptimeTicker();
   connectWebSocket();

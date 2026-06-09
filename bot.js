@@ -569,18 +569,28 @@ async function getNextPruneCandidate(currentBlock) {
     const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
     const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());
     
+    if (activeNetuids.length === 0) return null;
+
+    // Batch query network parameters to minimize RPC roundtrips from 384 sequential queries to 3 batch queries
+    const [registeredAtVals, immunityPeriodVals, emissionVals] = await Promise.all([
+      api.query.subtensorModule.networkRegisteredAt.multi(activeNetuids),
+      api.query.subtensorModule.immunityPeriod.multi(activeNetuids),
+      api.query.subtensorModule.emission.multi(activeNetuids)
+    ]);
+    
     let bestCandidate = null;
     let lowestEmission = null;
     let earliestRegisteredAt = null;
 
-    for (const netuid of activeNetuids) {
-      const registeredAtVal = await api.query.subtensorModule.networkRegisteredAt(netuid);
-      const immunityPeriodVal = await api.query.subtensorModule.immunityPeriod(netuid);
-      const emissionVal = await api.query.subtensorModule.emission(netuid);
+    for (let i = 0; i < activeNetuids.length; i++) {
+      const netuid = activeNetuids[i];
+      const registeredAtVal = registeredAtVals[i];
+      const immunityPeriodVal = immunityPeriodVals[i];
+      const emissionVal = emissionVals[i];
 
-      const registeredAt = Number(registeredAtVal.toString());
-      const immunityPeriod = Number(immunityPeriodVal.toString());
-      const emission = BigInt(emissionVal.toString());
+      const registeredAt = Number(registeredAtVal?.toString() || 0);
+      const immunityPeriod = Number(immunityPeriodVal?.toString() || 0);
+      const emission = BigInt(emissionVal?.toString() || 0);
 
       // Check if past immunity period
       if (currentBlock - registeredAt >= immunityPeriod) {
@@ -1522,6 +1532,7 @@ function stopBot() {
   currentActiveNode = 'Disconnected';
   currentLatency = -1;
   systemUptimeStart = null; // Reset uptime to 0
+  activeTimeoutRetryNumByWallet.clear(); // Clear timeout retry tracking map on shutdown
   log('INFO', '套利机器人已安全关闭。');
 }
 
