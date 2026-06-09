@@ -47,7 +47,7 @@ if [ -d ".git" ]; then
     echo -e "${YELLOW}未找到远程分支 $REMOTE_REF，自动回退使用 origin/main。${NC}"
     REMOTE_REF="origin/main"
   fi
-  
+
   # Check for uncommitted changes
   HAS_CHANGES=$(git status --porcelain)
   if [ -n "$HAS_CHANGES" ]; then
@@ -170,29 +170,33 @@ if command -v pm2 &> /dev/null; then
     console.log(cfg.webPort || 8080);
   } catch(e) { console.log(8080); }
   " 2>/dev/null)
-  
-  PORT_PIDS=""
-  if command -v lsof >/dev/null 2>&1; then
-    PIDS=$(lsof -tiTCP:$PORT -sTCP:LISTEN || true)
-    PORT_PIDS="$PIDS"
 
-    if [ -n "$PIDS" ]; then
-      echo -e "${YELLOW}检测到端口 $PORT 被以下进程占用：${NC}"
-      lsof -iTCP:$PORT -sTCP:LISTEN || true
+  get_port_pids() {
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | sort -u || true
+    elif command -v ss >/dev/null 2>&1; then
+      sudo ss -lntup 2>/dev/null | grep ":$PORT " | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
+    else
+      true
     fi
-  elif command -v ss >/dev/null 2>&1; then
-    SS_OUTPUT=$(sudo ss -lntup 2>/dev/null | grep ":$PORT " || true)
-    PORT_PIDS=$(echo "$SS_OUTPUT" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u)
+  }
 
-    if [ -n "$PORT_PIDS" ]; then
-      echo -e "${YELLOW}检测到端口 $PORT 被以下进程占用 (ss)：${NC}"
-      echo "$SS_OUTPUT"
+  show_port_owners() {
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -iTCP:$PORT -sTCP:LISTEN 2>/dev/null || true
+    elif command -v ss >/dev/null 2>&1; then
+      sudo ss -lntup 2>/dev/null | grep ":$PORT " || true
+    else
+      echo -e "${YELLOW}未安装 lsof/ss，无法显示端口占用详情。${NC}"
     fi
-  else
-    echo -e "${YELLOW}未安装 lsof/ss，跳过端口占用自动释放。${NC}"
-  fi
+  }
+
+  PORT_PIDS=$(get_port_pids)
 
   if [ -n "$PORT_PIDS" ]; then
+    echo -e "${YELLOW}检测到端口 $PORT 被以下进程占用：${NC}"
+    show_port_owners
+
     for PID in $PORT_PIDS; do
       CMD=$(ps -p "$PID" -o comm= 2>/dev/null || true)
       ARGS=$(ps -p "$PID" -o args= 2>/dev/null || true)
@@ -204,19 +208,28 @@ if command -v pm2 &> /dev/null; then
 
       if echo "$ARGS" | grep -q "server.js"; then
         echo -e "${YELLOW}检测到疑似旧机器人孤儿进程 PID=$PID，先尝试正常结束...${NC}"
-        kill "$PID" 2>/dev/null || true
+        kill "$PID" 2>/dev/null || sudo kill "$PID" 2>/dev/null || true
         sleep 2
 
-        if kill -0 "$PID" 2>/dev/null; then
-          echo -e "${RED}进程仍未退出，强制结束 PID=$PID...${NC}"
-          kill -9 "$PID" 2>/dev/null || true
+        STILL_ON_PORT=$(get_port_pids | grep -x "$PID" || true)
+        if kill -0 "$PID" 2>/dev/null || [ -n "$STILL_ON_PORT" ]; then
+          echo -e "${RED}进程仍未退出或仍占用端口，强制结束 PID=$PID...${NC}"
+          kill -9 "$PID" 2>/dev/null || sudo kill -9 "$PID" 2>/dev/null || true
+          sleep 1
+        fi
+
+        STILL_ON_PORT=$(get_port_pids | grep -x "$PID" || true)
+        if [ -n "$STILL_ON_PORT" ]; then
+          echo -e "${RED}无法释放端口 $PORT，PID=$PID 仍在监听。更新已终止，请手动检查。${NC}"
+          show_port_owners
+          exit 1
         fi
       else
         echo -e "${BLUE}端口占用进程不是 server.js，跳过强杀：PID=$PID CMD=$CMD${NC}"
       fi
     done
   fi
-  
+
   if [ -n "$DETECTED_PM2_ID" ]; then
     echo -e "${GREEN}检测到当前目录 PM2 进程: $DETECTED_PM2_NAME (id: $DETECTED_PM2_ID)，正在执行真正重启...${NC}"
     if ! pm2 restart "$DETECTED_PM2_ID" --update-env; then
@@ -239,6 +252,28 @@ if command -v pm2 &> /dev/null; then
       fi
     fi
     pm2 save
+  fi
+
+  sleep 2
+  FINAL_PM2_PID=$(node -e "
+  const execSync = require('child_process').execSync;
+  const path = require('path');
+  try {
+    const list = JSON.parse(execSync('pm2 jlist').toString());
+    const match = list.find(p => {
+      const env = p.pm2_env || {};
+      const cwd = env.pm_cwd || env.cwd;
+      return cwd && path.resolve(cwd) === path.resolve(process.env.CURRENT_DIR);
+    }) || list.find(p => p.name === 'bittensor-arbitrage-bot');
+    if (match && match.pid) console.log(match.pid);
+  } catch (e) {}
+  " 2>/dev/null)
+  FINAL_PORT_PIDS=$(get_port_pids)
+  if [ -n "$FINAL_PM2_PID" ] && [ -n "$FINAL_PORT_PIDS" ] && ! echo "$FINAL_PORT_PIDS" | grep -qx "$FINAL_PM2_PID"; then
+    echo -e "${RED}PM2 已启动，但 Web 端口 $PORT 未由 PM2 进程接管。${NC}"
+    echo -e "${RED}PM2 PID: $FINAL_PM2_PID；端口 PID: $FINAL_PORT_PIDS${NC}"
+    show_port_owners
+    exit 1
   fi
   echo -e "${GREEN}PM2 进程守护服务重启并重载成功！${NC}"
 else
