@@ -934,12 +934,12 @@ async function handlePendingExtrinsic(parsed) {
 
         const actionKey = `rename:${netuid}:${cleanName}`;
         if (seenActions.has(actionKey)) return true;
-        seenActions.set(actionKey, now);
 
         log('INFO', `[改名抢跑] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}" (Hash: ${txHash})`);
         
         const targetHotkey = await resolveHotkey(netuid);
         if (targetHotkey) {
+          seenActions.set(actionKey, now);
           executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, settings.renameTip, '改名抢跑', settings.renameSlippageLimit);
           return true;
         } else {
@@ -956,19 +956,13 @@ async function handlePendingExtrinsic(parsed) {
     }
   }
 
-  // 3. announceColdkeySwap / swapColdkey -> 冷键交换抢跑
-  if (/^(announceColdkeySwap|swapColdkey|announce_coldkey_swap|swap_coldkey|swapColdkeyAnnounced|swap_coldkey_announced)$/i.test(normalizedCall)) {
+  // 3. announceColdkeySwap -> 冷键交换声明抢跑（仅匹配 announceColdkeySwap / announce_coldkey_swap）
+  if (/^(announceColdkeySwap|announce_coldkey_swap)$/i.test(normalizedCall)) {
     if (!settings.swapEnabled) return true;
     try {
-      let oldColdkey = null;
-      if (/^(announceColdkeySwap|announce_coldkey_swap|swapColdkeyAnnounced|swap_coldkey_announced)$/i.test(callName)) {
-        oldColdkey = signer;
-      } else {
-        oldColdkey = args.old_coldkey?.toString() || args[0]?.toString();
-      }
-      
+      const oldColdkey = signer;
       if (oldColdkey && oldColdkey !== 'unsigned' && oldColdkey !== 'unknown') {
-        log('INFO', `[冷键交换抢跑] 扫到交换冷键声明/执行 -> ${callName} (Old Coldkey: ${oldColdkey})`);
+        log('INFO', `[冷键交换抢跑] 扫到交换冷键声明 -> ${callName} (Old Coldkey: ${oldColdkey})`);
 
         let matched = false;
         let anyHotkeyResolveFailed = false;
@@ -979,11 +973,11 @@ async function handlePendingExtrinsic(parsed) {
               matched = true;
               const actionKey = `swap:${netuid}:${oldColdkey}`;
               if (seenActions.has(actionKey)) continue;
-              seenActions.set(actionKey, now);
 
               log('INFO', `[冷键交换抢跑] 匹配到目标受控子网 #${netuid}，立即执行抢跑！`);
               const targetHotkey = await resolveHotkey(netuid);
               if (targetHotkey) {
+                seenActions.set(actionKey, now);
                 executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, settings.swapTip, '冷键交换抢跑', settings.swapSlippageLimit);
               } else {
                 log('WARN', `[冷键交换抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
@@ -1097,6 +1091,73 @@ async function handlePendingExtrinsic(parsed) {
   }
 
   return true;
+}
+
+// Block-Fallback scanner for missed mempool transactions (Strategy 2 & 3)
+async function detectEventsInBlock(blockHash, blockNumber) {
+  const settings = database.getSettings();
+  if (!settings.renameEnabled && !settings.swapEnabled) return;
+
+  // 兜底防空保护：确保 Owner 缓存已经同步就绪
+  if (settings.swapEnabled && subnetOwnersCache.size === 0) {
+    await refreshSubnetOwnersCache();
+  }
+
+  const block = await api.rpc.chain.getBlock(blockHash);
+  const extrinsics = block?.block?.extrinsics;
+  if (!extrinsics || extrinsics.length === 0) return;
+
+  const now = Date.now();
+  for (const ext of extrinsics) {
+    if (!ext || !ext.method) continue;
+
+    const sec = String(ext.method.section || '').trim();
+    const meth = String(ext.method.method || '').trim();
+
+    // Cheap string checks first to save CPU before parsing
+    const isRename = settings.renameEnabled && 
+      /^subtensor(Module)?$/i.test(sec) && 
+      /^(setSubnetIdentity|set_subnet_identity)$/i.test(meth);
+
+    const isSwap = settings.swapEnabled && 
+      /^subtensor(Module)?$/i.test(sec) && 
+      /^(announceColdkeySwap|announce_coldkey_swap)$/i.test(meth);
+
+    if (!isRename && !isSwap) continue;
+
+    try {
+      const parsed = parseExtrinsic(ext);
+      if (!parsed) continue;
+
+      // seenHashes 防重过滤
+      const entry = seenHashes.get(parsed.txHash);
+      if (entry && entry.handled) continue;
+
+      if (isRename) {
+        log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的改名交易 (Hash: ${parsed.txHash})`);
+        const handled = await handlePendingExtrinsic(parsed);
+        seenHashes.set(parsed.txHash, {
+          timestamp: now,
+          netuid: null,
+          tipTao: parsed.tipTao,
+          isRegisterNetwork: false,
+          handled: !!handled
+        });
+      } else if (isSwap) {
+        log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的冷键交换声明交易 (Hash: ${parsed.txHash})`);
+        const handled = await handlePendingExtrinsic(parsed);
+        seenHashes.set(parsed.txHash, {
+          timestamp: now,
+          netuid: null,
+          tipTao: parsed.tipTao,
+          isRegisterNetwork: false,
+          handled: !!handled
+        });
+      }
+    } catch (err) {
+      // 单个 extrinsic 的执行/解析异常，不影响其他 extrinsic 运行
+    }
+  }
 }
 
 // Resolve a valid hotkey for a given subnet using multi-tiered fallback
@@ -1752,7 +1813,7 @@ async function poll() {
         if (hashEntry && hashEntry.handled) continue;
 
         if (/^subtensor(Module)?$/i.test(parsed.section) && 
-            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|swapColdkey|swap_coldkey|swapColdkeyAnnounced|swap_coldkey_announced|addStake|addStakeLimit|add_stake|add_stake_limit|swapStake|swapStakeLimit|swap_stake|swap_stake_limit)$/i.test(parsed.callName)) {
+            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit|swapStake|swapStakeLimit|swap_stake|swap_stake_limit)$/i.test(parsed.callName)) {
           const handled = await handlePendingExtrinsic(parsed);
           seenHashes.set(parsed.txHash, {
             timestamp: now,
@@ -2005,10 +2066,16 @@ async function connectWs(reason = 'Normal Boot') {
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
     api.rpc.chain.subscribeNewHeads(async (header) => {
       if (generation !== connectGeneration || botStatus === 'Stopped') return;
-      currentBlockHeight = header.number.toNumber();
+      const blockNumber = header.number.toNumber();
+      currentBlockHeight = blockNumber;
       if (global.blockCallback) {
-        global.blockCallback(currentBlockHeight);
+        global.blockCallback(blockNumber);
       }
+
+      // 执行冷键与改名交易的区块自愈检测，传入高度常量避免日志错位
+      detectEventsInBlock(header.hash, blockNumber).catch(e => {
+        log('WARN', `[区块兜底] 解析新区块 #${blockNumber} 失败: ${e.message}`);
+      });
       
       const settings = database.getSettings();
       if (settings.dashingEnabled) {
