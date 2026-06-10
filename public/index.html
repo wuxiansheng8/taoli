@@ -478,6 +478,7 @@
                   <div class="form-group c-span-4">
                     <label>每秒请求频率限制 (RPS)</label>
                     <input type="number" id="cfg-rate-limit" min="1" max="100">
+                    <span class="hint" style="display: block; font-size: 11px; color: var(--text-muted); margin-top: 4px;">注：此限制仅针对非关键后台同步与诊断查询，不限制核心抢跑/打新交易池高频扫描，以确保最佳响应延迟。</span>
                   </div>
                   <div class="form-group c-span-12">
                     <label>多节点并发广播地址 (每行一个 WebSocket URL)</label>

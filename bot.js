@@ -17,6 +17,9 @@ let systemUptimeStart = null;
 let pollTimer = null;
 let latencyTimer = null;
 let isPolling = false;
+let reconnectTimer = null;
+let isConnecting = false;
+let connectGeneration = 0;
 let wallets = [];
 let keyring = null;
 let lastMempoolErrorTime = 0; // added for throttled error logging
@@ -842,7 +845,7 @@ async function handlePendingExtrinsic(parsed) {
 
   // 1. registerNetwork / register_network -> 新子网 Staking 抢购
   if (/^register(_)?network$/i.test(normalizedCall)) {
-    if (!settings.dashingEnabled) return;
+    if (!settings.dashingEnabled) return true;
     
     try {
       const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
@@ -864,7 +867,7 @@ async function handlePendingExtrinsic(parsed) {
       
       if (targetNetuid !== null && targetHotkey) {
         const actionKey = `dashing:${targetNetuid}`;
-        if (seenActions.has(actionKey)) return;
+        if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
 
         log('INFO', `[新子网打新] 扫到他人提交注册交易。预测 netuid #${targetNetuid}，提取到新子网目标 hotkey: ${targetHotkey}。立即启动极速 Staking 抢单！`);
@@ -880,17 +883,20 @@ async function handlePendingExtrinsic(parsed) {
           hotkey: targetHotkey,
           detectedAt: now
         };
+        return true;
       } else {
         log('WARN', `[新子网打新] 扫到注册网络交易，但无法解析目标 netuid (${targetNetuid}) 或 hotkey (${targetHotkey})`);
+        return false;
       }
     } catch (e) {
       log('ERROR', `处理新子网打新判断错误: ${e.message}`);
+      return false;
     }
   }
 
   // 2. setSubnetIdentity / set_subnet_identity -> 子网改名抢跑
   if (/^set(_)?subnet(_)?identity$/i.test(normalizedCall)) {
-    if (!settings.renameEnabled) return;
+    if (!settings.renameEnabled) return true;
     try {
       const netuid = Number(args.netuid?.toString() || args[0]?.toString());
       const nameRaw = args.subnet_name || args.name || args[1];
@@ -915,7 +921,7 @@ async function handlePendingExtrinsic(parsed) {
                                  /^subnet\s*\d+$/i.test(cleanName);
         if (isNewPlaceholder) {
           log('INFO', `[改名抢跑] 检测到子网 #${netuid} 新拟改名字 "${cleanName}" 为占位符或空值，判定为身份清空，跳过改名抢跑。`);
-          return;
+          return true;
         }
 
         // 🔒 安全保护 2：如果是全新创建的子网首次起名，跳过改名抢跑以避免与策略 1 重复买入。
@@ -923,11 +929,11 @@ async function handlePendingExtrinsic(parsed) {
         const registeredAt = subnetRegisteredAtCache.get(netuid) || 0;
         if (registeredAt > 0 && currentBlockHeight - registeredAt < 100) {
           log('INFO', `[改名抢跑] 子网 #${netuid} 为近 ${currentBlockHeight - registeredAt} 个区块内刚创建的新子网（内存判定）。跳过改名抢跑（由策略 1 负责 Staking 抢购），防止重复买入。`);
-          return;
+          return true;
         }
 
         const actionKey = `rename:${netuid}:${cleanName}`;
-        if (seenActions.has(actionKey)) return;
+        if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
 
         log('INFO', `[改名抢跑] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}" (Hash: ${txHash})`);
@@ -935,18 +941,24 @@ async function handlePendingExtrinsic(parsed) {
         const targetHotkey = await resolveHotkey(netuid);
         if (targetHotkey) {
           executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, settings.renameTip, '改名抢跑', settings.renameSlippageLimit);
+          return true;
         } else {
           log('WARN', `[改名抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
+          return false;
         }
+      } else {
+        log('WARN', `[改名抢跑] 无法解析 netuid (${netuid}) 或 cleanName (${cleanName})`);
+        return false;
       }
     } catch (e) {
       log('ERROR', `处理改名抢跑判断错误: ${e.message}`);
+      return false;
     }
   }
 
   // 3. announceColdkeySwap / swapColdkey -> 冷键交换抢跑
   if (/^(announceColdkeySwap|swapColdkey|announce_coldkey_swap|swap_coldkey|swapColdkeyAnnounced|swap_coldkey_announced)$/i.test(normalizedCall)) {
-    if (!settings.swapEnabled) return;
+    if (!settings.swapEnabled) return true;
     try {
       let oldColdkey = null;
       if (/^(announceColdkeySwap|announce_coldkey_swap|swapColdkeyAnnounced|swap_coldkey_announced)$/i.test(callName)) {
@@ -958,9 +970,13 @@ async function handlePendingExtrinsic(parsed) {
       if (oldColdkey && oldColdkey !== 'unsigned' && oldColdkey !== 'unknown') {
         log('INFO', `[冷键交换抢跑] 扫到交换冷键声明/执行 -> ${callName} (Old Coldkey: ${oldColdkey})`);
 
+        let matched = false;
+        let anyHotkeyResolveFailed = false;
+
         for (const [netuid, owner] of subnetOwnersCache.entries()) {
           try {
             if (owner === oldColdkey) {
+              matched = true;
               const actionKey = `swap:${netuid}:${oldColdkey}`;
               if (seenActions.has(actionKey)) continue;
               seenActions.set(actionKey, now);
@@ -971,19 +987,36 @@ async function handlePendingExtrinsic(parsed) {
                 executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, settings.swapTip, '冷键交换抢跑', settings.swapSlippageLimit);
               } else {
                 log('WARN', `[冷键交换抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
+                anyHotkeyResolveFailed = true;
               }
             }
-          } catch (e) {}
+          } catch (e) {
+            anyHotkeyResolveFailed = true;
+          }
         }
+
+        if (matched) {
+          return !anyHotkeyResolveFailed;
+        } else {
+          if (subnetOwnersCache.size === 0) {
+            log('WARN', `[冷键交换抢跑] 活跃子网 Owner 缓存为空，无法判断是否需要抢跑，跳过本次处理并等待重试...`);
+            return false;
+          }
+          return true;
+        }
+      } else {
+        log('WARN', `[冷键交换抢跑] 扫到交换 coldkey 交易，但无法解析 oldColdkey`);
+        return false;
       }
     } catch (e) {
       log('ERROR', `处理冷键交换抢跑判断错误: ${e.message}`);
+      return false;
     }
   }
 
   // 4. addStake / addStakeLimit / swapStake / swapStakeLimit -> 大额买入三明治套利
   if (/^(add(_)?stake|add(_)?stake(_)?limit|swap(_)?stake|swap(_)?stake(_)?limit)$/i.test(normalizedCall)) {
-    if (!settings.sandwichEnabled) return;
+    if (!settings.sandwichEnabled) return true;
     try {
       let netuid = null;
       let hotkey = null;
@@ -1011,40 +1044,59 @@ async function handlePendingExtrinsic(parsed) {
         const amountTao = Number(amountRao) / 1e9;
         if (amountTao >= settings.sandwichThreshold) {
           const actionKey = `sandwich:${txHash}`;
-          if (seenActions.has(actionKey)) return;
+          if (seenActions.has(actionKey)) return true;
           seenActions.set(actionKey, now);
 
           log('WARN', `[三明治套利] 扫到大额买入交易 (金额: ${amountTao.toFixed(2)} TAO, 子网 #${netuid}, 目标 Hotkey: ${hotkey}) (Hash: ${txHash})！`);
           sendTelegramAlert(`🚨 [三明治套利触发]\n检测到大额买入交易！\n金额: ${amountTao.toFixed(2)} TAO\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n发送者: ${signer}\n正在执行前置抢跑买入...`);
 
           // Calculate dynamic slippage
-          const calculatedSlippage = await calculateDynamicSlippage(netuid, amountTao);
+          let calculatedSlippage;
+          try {
+            calculatedSlippage = await calculateDynamicSlippage(netuid, amountTao);
+          } catch (e) {
+            log('WARN', `[三明治套利] 计算动态滑点失败: ${e.message}。使用默认滑点 0.05`);
+            calculatedSlippage = 0.05;
+          }
           
           if (settings.dynamicSlippageEnabled) {
             const safetyFactor = settings.dynamicSlippageSafetyFactor || 0.7;
             const expectedRise = calculatedSlippage / safetyFactor;
             if (expectedRise < 0.015) {
               log('INFO', `[三明治套利] 子网 #${netuid} 预测价格涨幅 ${(expectedRise * 100).toFixed(2)}% 过低，无法覆盖套利小费，放弃本次套利。`);
-              return;
+              return true;
             }
           }
 
           const buySuccess = await executeSandwichBuy(netuid, hotkey, settings.sandwichAmount, settings.sandwichTip, calculatedSlippage);
-          if (buySuccess && settings.sandwichAutoSell) {
-            log('INFO', `[三明治套利] 成功执行前置买入，已登记后置卖出，将在下一个区块头确认时自动发起售出...`);
-            pendingSandwichSell = {
-              netuid,
-              hotkey,
-              amount: settings.sandwichAmount,
-              tip: settings.sandwichSellTip
-            };
+          if (buySuccess) {
+            if (settings.sandwichAutoSell) {
+              log('INFO', `[三明治套利] 成功执行前置买入，已登记后置卖出，将在下一个区块头确认时自动发起售出...`);
+              pendingSandwichSell = {
+                netuid,
+                hotkey,
+                amount: settings.sandwichAmount,
+                tip: settings.sandwichSellTip
+              };
+            }
+            return true;
+          } else {
+            log('WARN', `[三明治套利] 执行前置买入失败，本次套利取消。`);
+            return false;
           }
+        } else {
+          return true;
         }
+      } else {
+        return false;
       }
     } catch (e) {
       log('ERROR', `处理大额买入抢跑判断错误: ${e.message}`);
+      return false;
     }
   }
+
+  return true;
 }
 
 // Resolve a valid hotkey for a given subnet using multi-tiered fallback
@@ -1639,7 +1691,11 @@ async function poll() {
   isPolling = true;
   try {
     const pendingHexs = await api.rpc.author.pendingExtrinsics();
-    if (!pendingHexs || pendingHexs.length === 0) return;
+    if (!pendingHexs || pendingHexs.length === 0) {
+      maxTipBySubnet.clear();
+      maxRegisterNetworkTip = 0;
+      return;
+    }
     
     const now = Date.now();
     
@@ -1647,7 +1703,8 @@ async function poll() {
     let currentMaxRegisterTip = 0;
     
     // Seen hashes TTL cleanup (5 minutes window)
-    for (const [hash, timestamp] of seenHashes.entries()) {
+    for (const [hash, entry] of seenHashes.entries()) {
+      const timestamp = (entry && typeof entry === 'object') ? entry.timestamp : entry;
       if (now - timestamp > 5 * 60 * 1000) seenHashes.delete(hash);
     }
     
@@ -1684,18 +1741,34 @@ async function poll() {
           }
         }
 
-        if (/^register(_)?network$/i.test(parsed.callName) && parsed.tipTao > 0) {
+        const isReg = /^register(_)?network$/i.test(parsed.callName);
+        if (isReg && parsed.tipTao > 0) {
           if (parsed.tipTao > currentMaxRegisterTip) {
             currentMaxRegisterTip = parsed.tipTao;
           }
         }
 
-        if (seenHashes.has(parsed.txHash)) continue;
-        seenHashes.set(parsed.txHash, now);
+        const hashEntry = seenHashes.get(parsed.txHash);
+        if (hashEntry && hashEntry.handled) continue;
 
         if (/^subtensor(Module)?$/i.test(parsed.section) && 
             /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|swapColdkey|swap_coldkey|swapColdkeyAnnounced|swap_coldkey_announced|addStake|addStakeLimit|add_stake|add_stake_limit|swapStake|swapStakeLimit|swap_stake|swap_stake_limit)$/i.test(parsed.callName)) {
-          await handlePendingExtrinsic(parsed);
+          const handled = await handlePendingExtrinsic(parsed);
+          seenHashes.set(parsed.txHash, {
+            timestamp: now,
+            netuid,
+            tipTao: parsed.tipTao,
+            isRegisterNetwork: isReg,
+            handled: !!handled
+          });
+        } else {
+          seenHashes.set(parsed.txHash, {
+            timestamp: now,
+            netuid,
+            tipTao: parsed.tipTao,
+            isRegisterNetwork: isReg,
+            handled: true
+          });
         }
       } catch (err) {
         // Silent error
@@ -1757,8 +1830,69 @@ function getUptimeSeconds() {
   return Math.floor((Date.now() - systemUptimeStart) / 1000);
 }
 
+// Schedule automatic reconnection
+function scheduleReconnect() {
+  if (botStatus === 'Stopped') return;
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  log('INFO', '将在 5 秒后尝试重新连接 API 节点...');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (botStatus !== 'Stopped') {
+      connectWs('Auto Reconnect').catch(e => {
+        log('ERROR', `自动重连异常: ${e.message}`);
+      });
+    }
+  }, 5000);
+}
+
+// Disconnect helper specifically for triggering reconnect flow
+function disconnectForReconnect(reason) {
+  log('WARN', `因 ${reason} 断开连接，准备自动重连...`);
+  
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  if (latencyTimer) {
+    clearInterval(latencyTimer);
+    latencyTimer = null;
+  }
+  if (broadcastLatencyTimer) {
+    clearInterval(broadcastLatencyTimer);
+    broadcastLatencyTimer = null;
+  }
+  for (const provider of broadcastProviders.values()) {
+    try { provider.disconnect(); } catch (e) {}
+  }
+  broadcastProviders.clear();
+  broadcastStatuses.clear();
+  
+  if (api) {
+    try { api.disconnect(); } catch (e) {}
+    api = null;
+  }
+  provider = null;
+  currentActiveNode = 'Disconnected';
+  currentLatency = -1;
+  systemUptimeStart = null;
+  activeTimeoutRetryNumByWallet.clear();
+  
+  connectGeneration++;
+  isConnecting = false;
+  
+  botStatus = 'Error';
+  scheduleReconnect();
+}
+
 // Main Connection Routine
 async function connectWs(reason = 'Normal Boot') {
+  if (isConnecting) {
+    log('INFO', `已经有一个连接流程在运行中，跳过本次连接请求 [原因: ${reason}]`);
+    return;
+  }
+  isConnecting = true;
+  const generation = ++connectGeneration;
+
   botStatus = 'Starting';
   log('INFO', `正在建立连接 [触发原因: ${reason}]...`);
   
@@ -1768,18 +1902,22 @@ async function connectWs(reason = 'Normal Boot') {
   if (targets.length === 0) {
     botStatus = 'Error';
     log('ERROR', '未配置任何 API 节点，请检查系统设置！');
+    isConnecting = false;
     return;
   }
 
   let connected = false;
   for (const url of targets) {
+    if (generation !== connectGeneration || botStatus === 'Stopped') {
+      isConnecting = false;
+      return;
+    }
     try {
       log('INFO', `尝试连接节点: ${url}...`);
       currentActiveNode = url;
       
-      provider = new WsProvider(url, false); // Do not auto-reconnect inside provider to manage fallback manually
+      provider = new WsProvider(url, false);
       
-      // Setup connection timeout
       const connPromise = new Promise((resolve, reject) => {
         provider.on('connected', () => resolve(true));
         provider.on('error', (err) => reject(err));
@@ -1789,8 +1927,23 @@ async function connectWs(reason = 'Normal Boot') {
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connection Timeout')), 6000));
       
       await Promise.race([connPromise, timeoutPromise]);
+      if (generation !== connectGeneration || botStatus === 'Stopped') {
+        try { provider.disconnect(); } catch (err) {}
+        provider = null;
+        isConnecting = false;
+        return;
+      }
       
       api = await ApiPromise.create({ provider });
+      if (generation !== connectGeneration || botStatus === 'Stopped') {
+        if (api) {
+          try { await api.disconnect(); } catch (err) {}
+          api = null;
+        }
+        provider = null;
+        isConnecting = false;
+        return;
+      }
       
       log('SUCCESS', `成功连接至节点: ${url} (链名称: ${api.runtimeChain || 'Subtensor'}, Spec版本: ${api.runtimeVersion?.specVersion || 'unknown'}, 创世哈希: ${api.genesisHash?.toHex().slice(0, 10)}...)`);
       connected = true;
@@ -1807,117 +1960,133 @@ async function connectWs(reason = 'Normal Boot') {
 
   if (!connected) {
     botStatus = 'Error';
-    log('ERROR', '所有配置的 API 节点均连接失败！进入关断模式。');
+    log('ERROR', '所有配置的 API 节点均连接失败！');
     currentActiveNode = 'Disconnected';
     currentLatency = -1;
-    systemUptimeStart = null; // Reset uptime to 0
+    systemUptimeStart = null;
+    isConnecting = false;
+    scheduleReconnect();
     return;
   }
 
-  botStatus = 'Running';
-  if (!systemUptimeStart) systemUptimeStart = Date.now();
-
-  // Test if unsafe RPC is enabled (required for mempool scanning)
   try {
-    log('INFO', '[API初始化] 正在测试本地节点是否开启 Unsafe RPC 接口 (用于交易池 Pending 交易扫描)...');
-    await api.rpc.author.pendingExtrinsics();
-    log('SUCCESS', '本地交易池 (Mempool) 监听接口测试成功：Unsafe RPC 已启用！');
-  } catch (err) {
-    const errMsg = err.message || String(err);
-    log('WARN', `[注意] 本地交易池监听接口测试失败: "${errMsg}"。如果该节点 is 你的交易网关，请确保节点启动命令配置了 --rpc-methods=Unsafe，否则机器人将无法监听 Pending 交易！`);
-  }
+    botStatus = 'Running';
+    if (!systemUptimeStart) systemUptimeStart = Date.now();
 
-  // Load wallets keypairs dynamically
-  log('INFO', '[API初始化] 正在加载本地小号钱包并同步链上 Nonce 与余额...');
-  await reloadWallets();
-  
-  // Initialize subnet owners cache
-  log('INFO', '[API初始化] 正在批量拉取链上所有活跃子网的注册区块、Owner 和 Hotkey 信息...');
-  await refreshSubnetOwnersCache();
-
-  // Initialize broadcast nodes and start latency tester
-  log('INFO', '[API初始化] 正在配置多节点广播组件并启动节点延迟测试...');
-  initBroadcastNodes();
-  if (broadcastLatencyTimer) clearInterval(broadcastLatencyTimer);
-  broadcastLatencyTimer = setInterval(testBroadcastNodes, 10000);
-  setTimeout(testBroadcastNodes, 2000);
-
-  log('SUCCESS', '[API初始化] 节点连接与全部初始化请求执行完毕！机器人正式进入 RUNNING 状态，已启动区块头 (subscribeNewHeads) 监听！');
-
-  // Subscribe to block headers
-  api.rpc.chain.subscribeNewHeads(async (header) => {
-    currentBlockHeight = header.number.toNumber();
-    if (global.blockCallback) {
-      global.blockCallback(currentBlockHeight);
-    }
-    
-    // 100% 独立链上自愈检测：检测是否有新注册/回收的子网，并执行兜底抢单
-    const settings = database.getSettings();
-    if (settings.dashingEnabled) {
-      const runDashingFlow = async () => {
-        if (pendingNewSubnet) {
-          const snipe = pendingNewSubnet;
-          pendingNewSubnet = null; // 立即清除，防止重复触发
-          if (activeSnipesByNetuid.has(snipe.netuid)) {
-            log('INFO', `[新子网打新] 区块头 #${currentBlockHeight} 到达。内存子网 #${snipe.netuid} 已有抢购循环在运行中，跳过内存兜底触发。`);
-          } else {
-            log('SUCCESS', `[新子网打新] 检测到新区块头 #${currentBlockHeight} 到达，立刻对内存中的新子网 #${snipe.netuid} (Hotkey: ${snipe.hotkey}) 执行 Staking 抢购！`);
-            executeStakingSniping(snipe.netuid, snipe.hotkey, 'Memory-Fallback').catch(e => {
-              log('ERROR', `[新子网打新] 触发内存兜底打新抢购失败: ${e.message}`);
-            });
-          }
-          // 内存快速兜底后，也同步更新一次缓存
-          await refreshSubnetOwnersCache();
-        } else {
-          // 运行链上自愈，完成后才允许刷新缓存，彻底杜绝缓存更新竞态
-          await detectNewSubnetOnChain(currentBlockHeight);
-          await refreshSubnetOwnersCache();
-        }
-      };
-      
-      runDashingFlow().catch(e => {
-        log('WARN', `[新子网打新] 链上自愈检测/缓存同步失败: ${e.message}`);
-      });
-    } else {
-      // 若打新未启用，依然刷新缓存以供其它策略使用
-      refreshSubnetOwnersCache().catch(() => {});
-    }
-
-    // Check pending Sandwich Sell (Backrun)
-    if (pendingSandwichSell) {
-      const sell = pendingSandwichSell;
-      pendingSandwichSell = null;
-      log('INFO', `[三明治套利] 检测到新区块 #${currentBlockHeight}，自动执行后置售出！`);
-      await executeSandwichSell(sell.netuid, sell.hotkey, sell.amount, sell.tip);
-    }
-  });
-
-  // Start Mempool Polling
-  const pollInterval = Math.max(50, settings.dashingIntervalMs || 100);
-  
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(poll, pollInterval);
-
-  // Start Latency loop
-  if (latencyTimer) clearInterval(latencyTimer);
-  latencyTimer = setInterval(async () => {
-    if (!api || !api.isConnected) {
-      log('WARN', '检测到 API 节点连接断开，正在尝试自动重连...');
-      stopBot();
-      connectWs('Connection Dropped');
-      return;
-    }
-    const start = Date.now();
+    if (generation !== connectGeneration || botStatus === 'Stopped') return;
     try {
-      await api.rpc.system.health();
-      currentLatency = Date.now() - start;
-    } catch (e) {
-      currentLatency = -1;
-      log('WARN', `API 节点通信无响应 (心跳超时): ${e.message}，尝试重连...`);
-      stopBot();
-      connectWs('Heartbeat Timeout');
+      log('INFO', '[API初始化] 正在测试本地节点是否开启 Unsafe RPC 接口 (用于交易池 Pending 交易扫描)...');
+      await api.rpc.author.pendingExtrinsics();
+      if (generation !== connectGeneration || botStatus === 'Stopped') return;
+      log('SUCCESS', '本地交易池 (Mempool) 监听接口测试成功：Unsafe RPC 已启用！');
+    } catch (err) {
+      if (generation !== connectGeneration || botStatus === 'Stopped') return;
+      const errMsg = err.message || String(err);
+      log('WARN', `[注意] 本地交易池监听接口测试失败: "${errMsg}"。如果该节点是你的交易网关，请确保节点启动命令配置了 --rpc-methods=Unsafe，否则机器人将无法监听 Pending 交易！`);
     }
-  }, 10000);
+
+    log('INFO', '[API初始化] 正在加载本地小号钱包并同步链上 Nonce 与余额...');
+    await reloadWallets();
+    if (generation !== connectGeneration || botStatus === 'Stopped') return;
+    
+    log('INFO', '[API初始化] 正在批量拉取链上所有活跃子网的注册区块、Owner 和 Hotkey 信息...');
+    await refreshSubnetOwnersCache();
+    if (generation !== connectGeneration || botStatus === 'Stopped') return;
+
+    log('INFO', '[API初始化] 正在配置多节点广播组件并启动节点延迟测试...');
+    initBroadcastNodes();
+    if (generation !== connectGeneration || botStatus === 'Stopped') return;
+    if (broadcastLatencyTimer) clearInterval(broadcastLatencyTimer);
+    broadcastLatencyTimer = setInterval(testBroadcastNodes, 10000);
+    setTimeout(testBroadcastNodes, 2000);
+
+    log('SUCCESS', '[API初始化] 节点连接与全部初始化请求执行完毕！机器人正式进入 RUNNING 状态，已启动区块头 (subscribeNewHeads) 监听！');
+
+    if (generation !== connectGeneration || botStatus === 'Stopped') return;
+    api.rpc.chain.subscribeNewHeads(async (header) => {
+      if (generation !== connectGeneration || botStatus === 'Stopped') return;
+      currentBlockHeight = header.number.toNumber();
+      if (global.blockCallback) {
+        global.blockCallback(currentBlockHeight);
+      }
+      
+      const settings = database.getSettings();
+      if (settings.dashingEnabled) {
+        const runDashingFlow = async () => {
+          if (pendingNewSubnet) {
+            const snipe = pendingNewSubnet;
+            pendingNewSubnet = null;
+            if (activeSnipesByNetuid.has(snipe.netuid)) {
+              log('INFO', `[新子网打新] 区块头 #${currentBlockHeight} 到达。内存子网 #${snipe.netuid} 已有抢购循环在运行中，跳过内存兜底触发。`);
+            } else {
+              log('SUCCESS', `[新子网打新] 检测到新区块头 #${currentBlockHeight} 到达，立刻对内存中的新子网 #${snipe.netuid} (Hotkey: ${snipe.hotkey}) 执行 Staking 抢购！`);
+              executeStakingSniping(snipe.netuid, snipe.hotkey, 'Memory-Fallback').catch(e => {
+                log('ERROR', `[新子网打新] 触发内存兜底打新抢购失败: ${e.message}`);
+              });
+            }
+            await refreshSubnetOwnersCache();
+          } else {
+            const hasChange = await detectNewSubnetOnChain(currentBlockHeight);
+            if (hasChange || currentBlockHeight % 100 === 0) {
+              await refreshSubnetOwnersCache();
+            }
+          }
+        };
+        
+        runDashingFlow().catch(e => {
+          log('WARN', `[新子网打新] 链上自愈检测/缓存同步失败: ${e.message}`);
+        });
+      } else {
+        if (currentBlockHeight % 100 === 0) {
+          refreshSubnetOwnersCache().catch(() => {});
+        }
+      }
+
+      if (pendingSandwichSell) {
+        const sell = pendingSandwichSell;
+        pendingSandwichSell = null;
+        log('INFO', `[三明治套利] 检测到新区块 #${currentBlockHeight}，自动执行后置售出！`);
+        await executeSandwichSell(sell.netuid, sell.hotkey, sell.amount, sell.tip);
+      }
+    });
+
+    const pollInterval = Math.max(50, settings.dashingIntervalMs || 100);
+    
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(poll, pollInterval);
+
+    if (latencyTimer) clearInterval(latencyTimer);
+    latencyTimer = setInterval(async () => {
+      if (!api || !api.isConnected) {
+        disconnectForReconnect('Connection Dropped');
+        return;
+      }
+      const start = Date.now();
+      try {
+        await api.rpc.system.health();
+        currentLatency = Date.now() - start;
+      } catch (e) {
+        currentLatency = -1;
+        disconnectForReconnect(`Heartbeat Timeout (${e.message})`);
+      }
+    }, 10000);
+
+  } catch (e) {
+    if (generation === connectGeneration && botStatus !== 'Stopped') {
+      botStatus = 'Error';
+      log('ERROR', `连接初始化失败: ${e.message}`);
+      if (api) {
+        try { await api.disconnect(); } catch (err) {}
+        api = null;
+      }
+      provider = null;
+      scheduleReconnect();
+    }
+  } finally {
+    if (generation === connectGeneration) {
+      isConnecting = false;
+    }
+  }
 }
 
 // Start and Stop control
@@ -1934,6 +2103,13 @@ function stopBot() {
   botStatus = 'Stopped';
   log('INFO', '套利机器人正在关闭...');
   
+  connectGeneration++;
+  isConnecting = false;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
@@ -1947,7 +2123,6 @@ function stopBot() {
     broadcastLatencyTimer = null;
   }
   
-  // Clean up all broadcast connections
   for (const provider of broadcastProviders.values()) {
     try { provider.disconnect(); } catch (e) {}
   }
@@ -1963,8 +2138,8 @@ function stopBot() {
   provider = null;
   currentActiveNode = 'Disconnected';
   currentLatency = -1;
-  systemUptimeStart = null; // Reset uptime to 0
-  activeTimeoutRetryNumByWallet.clear(); // Clear timeout retry tracking map on shutdown
+  systemUptimeStart = null;
+  activeTimeoutRetryNumByWallet.clear();
   log('INFO', '套利机器人已安全关闭。');
 }
 
