@@ -617,6 +617,9 @@ function parseExtrinsic(ext) {
     const callName = String(ext.method.method || '').trim();
     const signer = ext.signer ? ext.signer.toString() : 'unsigned';
     const txHash = ext.hash ? ext.hash.toHex() : 'unknown';
+    const nonce = ext.nonce !== undefined && ext.nonce !== null
+      ? Number(ext.nonce.toString())
+      : null;
 
     // Decode extrinsic tip
     const tipBigInt = ext.tip ? BigInt(ext.tip.toString()) : 0n;
@@ -644,7 +647,8 @@ function parseExtrinsic(ext) {
       signer,
       txHash,
       args,
-      tipTao
+      tipTao,
+      nonce
     };
   } catch (err) {
     return null;
@@ -1008,8 +1012,8 @@ async function handlePendingExtrinsic(parsed) {
     }
   }
 
-  // 4. addStake / addStakeLimit / swapStake / swapStakeLimit -> 大额买入三明治套利
-  if (/^(add(_)?stake|add(_)?stake(_)?limit|swap(_)?stake|swap(_)?stake(_)?limit)$/i.test(normalizedCall)) {
+  // 4. addStake / addStakeLimit -> 大额买入三明治套利（彻底排除 swapStake 干扰）
+  if (/^(add(_)?stake|add(_)?stake(_)?limit)$/i.test(normalizedCall)) {
     if (!settings.sandwichEnabled) return true;
     try {
       let netuid = null;
@@ -1020,28 +1024,53 @@ async function handlePendingExtrinsic(parsed) {
       if (/^add(_)?stake/i.test(normalizedCall)) {
         hotkey = args.hotkey?.toString() || args[0]?.toString();
         netuid = Number(args.netuid?.toString() || args[1]?.toString());
-        amountRao = BigInt(args.stake_to_be_added?.toString() || args.amount?.toString() || args.amount_staked?.toString() || args[2]?.toString() || '0');
+        amountRao = BigInt(
+          args.amountStaked?.toString() || 
+          args.amount_staked?.toString() || 
+          args.stake_to_be_added?.toString() || 
+          args.amount?.toString() || 
+          args[2]?.toString() || 
+          '0'
+        );
         isBuy = true;
-      } else {
-        hotkey = args.hotkey?.toString() || args[0]?.toString();
-        const originNetuid = Number(args.origin_netuid?.toString() || args.origin?.toString() || args[1]?.toString());
-        const destNetuid = Number(args.destination_netuid?.toString() || args.destination?.toString() || args[2]?.toString());
-        amountRao = BigInt(args.alpha_amount?.toString() || args.amount?.toString() || args[3]?.toString() || '0');
-        
-        if (destNetuid > 0) {
-          netuid = destNetuid;
-          isBuy = true;
-        }
       }
 
       if (isBuy && netuid !== null && hotkey) {
+        if (!Number.isFinite(netuid) || netuid <= 0) return true; // 严格过滤无效子网和子网 0
         const amountTao = Number(amountRao) / 1e9;
         if (amountTao >= settings.sandwichThreshold) {
           const actionKey = `sandwich:${txHash}`;
           if (seenActions.has(actionKey)) return true;
+
+          // 核心验证：过滤虚假/无效交易（无 nonce/signer 则保守跳过）
+          if (!signer || signer === 'unsigned' || parsed.nonce === null) {
+            log('INFO', `[三明治套利] 过滤无法解析 signer 或 nonce 的交易: Hash: ${txHash}, Signer: ${signer}, Nonce: ${parsed.nonce}`);
+            return true;
+          }
+
+          try {
+            const accountInfo = await api.query.system.account(signer);
+            const nextNonce = accountInfo.nonce.toNumber();
+            
+            // 严格要求 nonce 必须等于 nextNonce，过滤过期或未来 nonce 交易，确保紧挨着夹人
+            if (parsed.nonce !== nextNonce) {
+              log('INFO', `[三明治套利] 过滤 Nonce 不匹配 the交易 (未来或过期): Hash: ${txHash}, Signer: ${signer}, TxNonce: ${parsed.nonce}, ChainNonce: ${nextNonce}`);
+              return true;
+            }
+            
+            const freeBalance = BigInt(accountInfo.data.free.toString());
+            if (freeBalance < amountRao) {
+              log('WARN', `[三明治套利] 过滤余额不足的虚假买入交易: Hash: ${txHash}, Signer: ${signer}, 余额: ${(Number(freeBalance) / 1e9).toFixed(2)} TAO, 需质押: ${(Number(amountRao) / 1e9).toFixed(2)} TAO`);
+              return true;
+            }
+          } catch (err) {
+            log('WARN', `[三明治套利] 验证交易有效性时发生异常: ${err.message}，放弃本次套利。`);
+            return true; // 验证失败保守跳过，确保安全
+          }
+
           seenActions.set(actionKey, now);
 
-          log('WARN', `[三明治套利] 扫到大额买入交易 (金额: ${amountTao.toFixed(2)} TAO, 子网 #${netuid}, 目标 Hotkey: ${hotkey}) (Hash: ${txHash})！`);
+          log('WARN', `[三明治套利] 扫到大额买入交易 (金额: ${amountTao.toFixed(2)} TAO, 子网 #${netuid}, 目标 Hotkey: ${hotkey}, 夹人地址: ${signer}) (Hash: ${txHash})！`);
           sendTelegramAlert(`🚨 [三明治套利触发]\n检测到大额买入交易！\n金额: ${amountTao.toFixed(2)} TAO\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n发送者: ${signer}\n正在执行前置抢跑买入...`);
 
           // Calculate dynamic slippage
@@ -1373,6 +1402,24 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
   }
 }
 
+// Helper to query Alpha balance from chain and log the raw value
+async function queryAlphaBalance(hotkey, coldkey, netuid) {
+  if (!api.query.subtensorModule.alpha) {
+    log('WARN', `[余额查询] api.query.subtensorModule.alpha 不存在，尝试使用旧版本 stake 查询`);
+    if (api.query.subtensorModule.stake) {
+      const stakeVal = await api.query.subtensorModule.stake(hotkey, coldkey);
+      log('INFO', `[余额查询] stake (旧版本) 查询结果 raw: ${stakeVal.toString()}`);
+      return BigInt(stakeVal.toString());
+    }
+    return 0n;
+  }
+  
+  const alphaVal = await api.query.subtensorModule.alpha(hotkey, coldkey, netuid);
+  const alphaRao = BigInt(alphaVal.toString());
+  log('INFO', `[余额查询] alpha 查询结果 raw (Rao): ${alphaRao.toString()} (Hotkey: ${hotkey.slice(-6)}, Coldkey: ${coldkey.slice(-6)}, Netuid: ${netuid})`);
+  return alphaRao;
+}
+
 // Sandwich Buy (Frontrun)
 async function executeSandwichBuy(netuid, hotkey, amountTao, tip, slippageLimit) {
   const settings = database.getSettings();
@@ -1386,7 +1433,7 @@ async function executeSandwichBuy(netuid, hotkey, amountTao, tip, slippageLimit)
   try {
     const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
     log('INFO', `[三明治套利] 发起前置抢跑买入 -> 钱包: ${w.name}, 小费: ${targetTip} TAO`);
-    const res = await sendTx(tx, w.pair, 10000, targetTip, {
+    const res = await sendTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip, {
       netuid,
       hotkey,
       amountBigInt,
@@ -1421,8 +1468,7 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
   try {
     log('INFO', `[三明治套利] 正在查询钱包【${w.name}】在子网 #${netuid} 的实际 Alpha 质押余额...`);
     for (let attempt = 0; attempt < 5; attempt++) {
-      const stakeVal = await api.query.subtensorModule.stake(hotkey, w.pair.address);
-      stakeRao = BigInt(stakeVal.toString());
+      stakeRao = await queryAlphaBalance(hotkey, w.pair.address, netuid);
       if (stakeRao > 0n) break;
       await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -1431,8 +1477,9 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
   }
 
   if (stakeRao === 0n) {
-    log('WARN', `[三明治套利] 未查询到实际 stake 余额，回退使用估算金额。`);
-    stakeRao = BigInt(Math.floor(amountTao * 1e9));
+    log('ERROR', `[三明治套利] 未查询到实际 Alpha 质押余额，放弃盲目卖出以防损失！请手动查账！`);
+    sendTelegramAlert(`❌ [三明治套利异常]\n前置买入已成功，但无法查询到实际质押余额，终止自动卖出！请立即手动查账处理！`);
+    return;
   } else {
     log('INFO', `[三明治套利] 成功获取到实际 Alpha 质押余额: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha`);
   }
@@ -1440,7 +1487,7 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
   try {
     const tx = await buildUnstakeTx(hotkey, netuid, stakeRao, settings.sandwichSlippageLimit);
     log('INFO', `[三明治套利] 发起后置卖出 -> 钱包: ${w.name}, 数量: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha, 小费: ${targetTip} TAO`);
-    const res = await sendTx(tx, w.pair, 10000, targetTip);
+    const res = await sendTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip);
     if (res.success) {
       log('SUCCESS', `[三明治套利] 后置卖出回补成功！套利完成！Hash: ${res.hash}`);
       sendTelegramAlert(`🎉 [三明治套利成功]\n钱包: ${w.name}\n子网: #${netuid}\n卖出数量: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha\n卖出交易哈希: ${res.hash}`);
@@ -1816,7 +1863,7 @@ async function poll() {
         }
 
         if (/^subtensor(Module)?$/i.test(parsed.section) && 
-            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit|swapStake|swapStakeLimit|swap_stake|swap_stake_limit)$/i.test(parsed.callName)) {
+            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit)$/i.test(parsed.callName)) {
           const handled = await handlePendingExtrinsic(parsed);
           seenHashes.set(parsed.txHash, {
             timestamp: now,
