@@ -1810,7 +1810,10 @@ async function poll() {
         }
 
         const hashEntry = seenHashes.get(parsed.txHash);
-        if (hashEntry && hashEntry.handled) continue;
+        if (hashEntry) {
+          if (hashEntry.handled) continue;
+          if (now - hashEntry.timestamp < 3000) continue; // 限制失败交易重试频率为最快每 3 秒一次，防止高频砸 RPC 节点和刷警告日志
+        }
 
         if (/^subtensor(Module)?$/i.test(parsed.section) && 
             /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit|swapStake|swapStakeLimit|swap_stake|swap_stake_limit)$/i.test(parsed.callName)) {
