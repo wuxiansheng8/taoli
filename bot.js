@@ -1188,11 +1188,61 @@ async function handlePendingExtrinsic(parsed) {
 // Block-Fallback scanner for missed mempool transactions (Strategy 2 & 3)
 async function detectEventsInBlock(blockHash, blockNumber) {
   const settings = database.getSettings();
-  if (!settings.renameEnabled && !settings.swapEnabled) return;
+  if (!settings.renameEnabled && !settings.swapEnabled && !settings.dashingEnabled) return;
 
   // 兜底防空保护：确保 Owner 缓存已经同步就绪
   if (settings.swapEnabled && subnetOwnersCache.size === 0) {
     await refreshSubnetOwnersCache();
+  }
+
+  // 获取区块的所有事件并解析输出日志
+  let allRecords = [];
+  try {
+    allRecords = await api.query.system.events.at(blockHash);
+  } catch (err) {
+    // 忽略获取事件异常
+  }
+
+  if (allRecords && allRecords.length > 0) {
+    allRecords.forEach(({ event, phase }) => {
+      if (!phase.isApplyExtrinsic) return;
+      const extrinsicIndex = phase.asApplyExtrinsic.toNumber();
+      const section = event.section;
+      const method = event.method;
+      const data = event.data.toHuman();
+
+      // 1. NetworkAdded (新子网注册成功)
+      if (section === 'subtensorModule' && method === 'NetworkAdded') {
+        const netuid = data[0];
+        log('SUCCESS', `[新子网打新] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式注册成功！`);
+      }
+
+      // 2. SubnetIdentitySet (子网改名成功)
+      if (section === 'subtensorModule' && method === 'SubnetIdentitySet') {
+        const netuid = data[0];
+        log('SUCCESS', `[改名抢跑] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式改名成功！`);
+      }
+
+      // 3. ColdkeySwapAnnounced (冷键交换声明成功)
+      if (section === 'subtensorModule' && method === 'ColdkeySwapAnnounced') {
+        const coldkey = data[0];
+        const swapColdkey = data[1];
+        log('SUCCESS', `[冷键交换] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkey}！`);
+      }
+
+      // 4. StakeAdded (质押成功 - 检查是否是我们的钱包)
+      if (section === 'subtensorModule' && method === 'StakeAdded') {
+        const coldkey = data[0];
+        const hotkey = data[1];
+        const amountRao = data[2];
+        const netuid = data[4];
+
+        const w = wallets.find(x => x.pair && x.pair.address === coldkey);
+        if (w) {
+          log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${(Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2)} TAO (Hotkey: ${hotkey})`);
+        }
+      }
+    });
   }
 
   const block = await api.rpc.chain.getBlock(blockHash);
