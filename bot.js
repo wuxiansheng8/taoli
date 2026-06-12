@@ -1214,20 +1214,26 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       // 1. NetworkAdded (新子网注册成功)
       if (section === 'subtensorModule' && method === 'NetworkAdded') {
         const netuid = data[0];
-        log('SUCCESS', `[新子网打新] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式注册成功！`);
+        const logMsg = `[新子网打新] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式注册成功！`;
+        log('SUCCESS', logMsg);
+        sendTelegramAlert(`🎉 ${logMsg}`).catch(() => {});
       }
 
       // 2. SubnetIdentitySet (子网改名成功)
       if (section === 'subtensorModule' && method === 'SubnetIdentitySet') {
         const netuid = data[0];
-        log('SUCCESS', `[改名抢跑] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式改名成功！`);
+        const logMsg = `[改名抢跑] 目标子网 #${netuid} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式改名成功！`;
+        log('SUCCESS', logMsg);
+        sendTelegramAlert(`🎉 ${logMsg}`).catch(() => {});
       }
 
       // 3. ColdkeySwapAnnounced (冷键交换声明成功)
       if (section === 'subtensorModule' && method === 'ColdkeySwapAnnounced') {
         const coldkey = data[0];
         const swapColdkey = data[1];
-        log('SUCCESS', `[冷键交换] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkey}！`);
+        const logMsg = `[冷键交换] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkey}！`;
+        log('SUCCESS', logMsg);
+        sendTelegramAlert(`🎉 ${logMsg}`).catch(() => {});
       }
 
       // 4. StakeAdded (质押成功 - 检查是否是我们的钱包)
@@ -1239,7 +1245,10 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
         const w = wallets.find(x => x.pair && x.pair.address === coldkey);
         if (w) {
-          log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${(Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2)} TAO (Hotkey: ${hotkey})`);
+          const amountTao = (Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2);
+          log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
+          
+          sendTelegramAlert(`🔔 [打新/抢跑 链上最终确认]\n我们的钱包: 【${w.name}】\n已于区块: #${blockNumber} 第 ${extrinsicIndex} 笔交易最终质押成功！\n金额: ${amountTao} TAO\n子网: #${netuid}\nHotkey: ${hotkey}`).catch(() => {});
         }
       }
     });
