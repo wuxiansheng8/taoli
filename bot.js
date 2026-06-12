@@ -870,6 +870,69 @@ async function handlePendingExtrinsic(parsed) {
       const targetHotkey = args.hotkey?.toString() || args[0]?.toString();
       
       if (targetNetuid !== null && targetHotkey) {
+        // 🔒 安全保护：Hotkey 拥有者关系校验 + Nonce/余额多级校验，防止误买旧子网
+        try {
+          const ownerQuery = api.query.subtensorModule.owner || api.query.subtensorModule.Owner;
+          if (!ownerQuery || typeof ownerQuery.key !== 'function') {
+            log('WARN', `[新子网打新] 拦截抢购：无法获取 subtensorModule.owner 查询接口，保守拦截以防误买。`);
+            return true;
+          }
+
+          const ownerKey = ownerQuery.key(targetHotkey);
+          const rawOwner = await api.rpc.state.getStorage(ownerKey);
+          const hotkeyExists = rawOwner !== null && rawOwner !== undefined && !rawOwner.isEmpty;
+
+          if (hotkeyExists) {
+            const ownerVal = await ownerQuery(targetHotkey);
+            const ownerAddress = ownerVal.toString();
+
+            // 情况 B：Hotkey 已存在，但 owner 不等于当前注册人 signer (注册必定失败)
+            if (ownerAddress !== signer) {
+              log('WARN', `[新子网打新] 过滤/拦截无效注册交易：Hotkey ${targetHotkey} 属于 ${ownerAddress}，并非当前注册人 ${signer}`);
+              return true; // 拦截，跳过抢购
+            }
+
+            // 情况 C：Hotkey 已存在，且 owner == signer (存在旧子网冲突风险，启动严格校验)
+            log('INFO', `[新子网打新] 检测到 Hotkey ${targetHotkey} 全局已存在且归属正确。启动 Nonce 和链上余额双重安全校验...`);
+
+            // ①. 校验 Nonce 连续性 (必须 is 当前 nextNonce)
+            const regAccount = await api.query.system.account(signer);
+            const nextNonce = Number(regAccount.nonce.toString());
+            if (parsed.nonce !== null && parsed.nonce !== nextNonce) {
+              log('WARN', `[新子网打新] 拦截未来 Nonce 交易: Signer: ${signer}, 交易 Nonce: ${parsed.nonce}, 链上 Next Nonce: ${nextNonce}`);
+              return true; // 拦截
+            }
+
+            // ②. 校验链上当前可用余额是否足够支付 Lock Cost
+            const providerInstance = api.rpc.provider || (api._rpcCore && api._rpcCore.provider);
+            if (!providerInstance || typeof providerInstance.send !== 'function') {
+              log('WARN', `[新子网打新] 拦截抢购：RPC Provider 接口不可用，无法查询 Lock Cost。`);
+              return true; // 拦截
+            }
+
+            const lockCostVal = await providerInstance.send('subnetInfo_getLockCost', [null]);
+            if (!lockCostVal) {
+              log('WARN', `[新子网打新] 拦截抢购：查询 subnetInfo_getLockCost 返回空值。`);
+              return true; // 拦截
+            }
+
+            const lockCostRao = BigInt(lockCostVal.toString());
+            const regFreeBalance = BigInt(regAccount.data.free.toString());
+
+            if (regFreeBalance < lockCostRao) {
+              log('WARN', `[新子网打新] 拦截当前可用余额不足交易: Signer: ${signer}, 链上余额: ${(Number(regFreeBalance) / 1e9).toFixed(2)} TAO, 需锁仓: ${(Number(lockCostRao) / 1e9).toFixed(2)} TAO`);
+              return true; // 拦截
+            }
+          } else {
+            // 情况 A：Hotkey 全局不存在
+            // 提前 addStake 即使排在最前面，也会因为 HotKeyAccountNotExists 失败，无误买旧子网的风险，放行极速打新！
+            log('INFO', `[新子网打新] Hotkey ${targetHotkey} 全局不存在，确认无误买风险，放行极速打新！`);
+          }
+        } catch (checkErr) {
+          log('WARN', `[新子网打新] 执行多级安全校验时发生异常: ${checkErr.message}，已安全拦截抢购。`);
+          return true; // 发生异常时，安全拦截，跳过抢购
+        }
+
         const actionKey = `dashing:${targetNetuid}`;
         if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
