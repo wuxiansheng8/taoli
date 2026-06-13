@@ -870,6 +870,7 @@ async function handlePendingExtrinsic(parsed) {
       const targetHotkey = args.hotkey?.toString() || args[0]?.toString();
       
       if (targetNetuid !== null && targetHotkey) {
+        let hotkeyExists = false;
         // 🔒 安全保护：Hotkey 拥有者关系校验 + Nonce/余额多级校验，防止误买旧子网
         try {
           const ownerQuery = api.query.subtensorModule.owner || api.query.subtensorModule.Owner;
@@ -880,7 +881,7 @@ async function handlePendingExtrinsic(parsed) {
 
           const ownerKey = ownerQuery.key(targetHotkey);
           const rawOwner = await api.rpc.state.getStorage(ownerKey);
-          const hotkeyExists = rawOwner !== null && rawOwner !== undefined && !rawOwner.isEmpty;
+          hotkeyExists = rawOwner !== null && rawOwner !== undefined && !rawOwner.isEmpty;
 
           if (hotkeyExists) {
             const ownerVal = await ownerQuery(targetHotkey);
@@ -937,19 +938,25 @@ async function handlePendingExtrinsic(parsed) {
         if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
 
-        log('INFO', `[新子网打新] 扫到他人提交注册交易。预测 netuid #${targetNetuid}，提取到新子网目标 hotkey: ${targetHotkey}。立即启动极速 Staking 抢单！`);
+        // 无论是全新还是已存热键，都在内存中登记 pendingNewSubnet，确保兜底生效
+        pendingNewSubnet = {
+          netuid: targetNetuid,
+          hotkey: targetHotkey,
+          detectedAt: now
+        };
+
+        if (hotkeyExists) {
+          log('WARN', `[新子网打新] 检测到 Hotkey ${targetHotkey} 全局已存在。为防止同名回收或跨子网混淆风险，跳过 Mempool 立即开火，登记 Memory-Fallback，等待下个区块头后再补打，降低排在注册交易前面的风险。`);
+          return true; // 结束 Mempool 触发
+        }
+
+        log('INFO', `[新子网打新] 扫到他人提交注册交易。预测 netuid #${targetNetuid}，提取到新子网目标 hotkey: ${targetHotkey}。且该 Hotkey 全局不存在，确认无误买风险，立即启动极速 Mempool Staking 抢单！`);
         
         // 立即执行极速抢单，并在后台进行重试与并发
         executeStakingSniping(targetNetuid, targetHotkey, 'Mempool').catch(e => {
           log('ERROR', `[新子网打新] 触发极速抢购失败: ${e.message}`);
         });
 
-        // 同时也保留 pendingNewSubnet 标记作为备用，确保在新区块头到达时，如果仍未成功则做快速内存兜底
-        pendingNewSubnet = {
-          netuid: targetNetuid,
-          hotkey: targetHotkey,
-          detectedAt: now
-        };
         return true;
       } else {
         log('WARN', `[新子网打新] 扫到注册网络交易，但无法解析目标 netuid (${targetNetuid}) 或 hotkey (${targetHotkey})`);
