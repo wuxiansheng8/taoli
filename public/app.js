@@ -334,6 +334,9 @@ async function loadConfig() {
     document.getElementById('strat-sandwich-sell-tip').value = cfg.sandwichSellTip;
     document.getElementById('strat-sandwich-autosell').checked = cfg.sandwichAutoSell;
     
+    // Global Default Hotkey
+    document.getElementById('cfg-default-hotkey').value = cfg.defaultHotkey || '';
+    
     // Slippage Limits
     document.getElementById('strat-dashing-slippage').value = cfg.dashingSlippageLimit !== undefined ? cfg.dashingSlippageLimit : '';
     document.getElementById('strat-rename-slippage').value = cfg.renameSlippageLimit !== undefined ? cfg.renameSlippageLimit : '';
@@ -418,7 +421,10 @@ async function saveStrategies() {
     
     // AMM Dynamic Slippage
     dynamicSlippageEnabled: document.getElementById('cfg-dynamic-slippage-enabled').checked,
-    dynamicSlippageSafetyFactor: document.getElementById('cfg-dynamic-slippage-safety-factor').value !== '' ? Number(document.getElementById('cfg-dynamic-slippage-safety-factor').value) : 0.7
+    dynamicSlippageSafetyFactor: document.getElementById('cfg-dynamic-slippage-safety-factor').value !== '' ? Number(document.getElementById('cfg-dynamic-slippage-safety-factor').value) : 0.7,
+    
+    // Global Default Hotkey
+    defaultHotkey: document.getElementById('cfg-default-hotkey').value.trim()
   };
   
   try {

@@ -1161,13 +1161,18 @@ async function handlePendingExtrinsic(parsed) {
             }
           }
 
-          const buySuccess = await executeSandwichBuy(netuid, hotkey, settings.sandwichAmount, settings.sandwichTip, calculatedSlippage);
+          const targetHotkey = await resolveHotkey(netuid);
+          if (!targetHotkey) {
+            log('WARN', `[三明治套利] 全局默认 Hotkey 未配置，跳过前置买入。`);
+            return true;
+          }
+          const buySuccess = await executeSandwichBuy(netuid, targetHotkey, settings.sandwichAmount, settings.sandwichTip, calculatedSlippage);
           if (buySuccess) {
             if (settings.sandwichAutoSell) {
               log('INFO', `[三明治套利] 成功执行前置买入，已登记后置卖出，将在下一个区块头确认时自动发起售出...`);
               pendingSandwichSell = {
                 netuid,
-                hotkey,
+                hotkey: targetHotkey,
                 amount: settings.sandwichAmount,
                 tip: settings.sandwichSellTip
               };
@@ -1320,53 +1325,10 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
 // Resolve a valid hotkey for a given subnet using multi-tiered fallback
 async function resolveHotkey(netuid, force = false) {
-  if (!force) {
-    const cached = subnetHotkeysCache.get(netuid);
-    if (cached && cached.length >= 47) return cached;
+  const settings = database.getSettings();
+  if (settings.defaultHotkey && settings.defaultHotkey.trim() !== '') {
+    return settings.defaultHotkey.trim();
   }
-
-  try {
-    const ownerHotkeyObj = await api.query.subtensorModule.subnetOwnerHotkey(netuid);
-    if (ownerHotkeyObj && !ownerHotkeyObj.isEmpty) {
-      const hk = ownerHotkeyObj.toString();
-      if (hk && hk.length >= 47) {
-        subnetHotkeysCache.set(netuid, hk);
-        return hk;
-      }
-    }
-  } catch (e) {
-    log('WARN', `[解析Hotkey] 通过 subnetOwnerHotkey 查询子网 #${netuid} 失败: ${e.message}`);
-  }
-
-  try {
-    const uids = [0, 1, 2, 3, 4, 5];
-    const keys = await api.query.subtensorModule.keys.multi(uids.map(uid => [netuid, uid]));
-    for (const keyObj of keys) {
-      if (keyObj && !keyObj.isEmpty) {
-        const hk = keyObj.toString();
-        if (hk && hk.length >= 47) {
-          subnetHotkeysCache.set(netuid, hk);
-          return hk;
-        }
-      }
-    }
-  } catch (e) {
-    log('WARN', `[解析Hotkey] 通过 keys.multi 查询子网 #${netuid} 失败: ${e.message}`);
-  }
-  
-  try {
-    const owner = await api.query.subtensorModule.subnetOwner(netuid);
-    if (owner && !owner.isEmpty) {
-      const ownerStr = owner.toString();
-      if (ownerStr && ownerStr.length >= 47) {
-        subnetHotkeysCache.set(netuid, ownerStr);
-        return ownerStr;
-      }
-    }
-  } catch (e) {
-    log('WARN', `[解析Hotkey] 通过 subnetOwner 查询子网 #${netuid} 失败: ${e.message}`);
-  }
-  
   return null;
 }
 
@@ -1719,12 +1681,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     return;
   }
 
-  // 优先用传入的 hotkey（从 pending registerNetwork 中提取的），否则回退使用 resolveHotkey
-  let targetHotkey = hotkey;
-  if (!targetHotkey) {
-    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 未提取到 mempool hotkey，启动链上检索...`);
-    targetHotkey = await resolveHotkey(netuid);
-  }
+  const targetHotkey = await resolveHotkey(netuid);
 
   if (!targetHotkey) {
     log('WARN', `[新子网打新] [触发源: ${triggerSource}] 无法为子网 #${netuid} 解析到有效 hotkey，打新抢购取消。`);

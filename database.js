@@ -41,6 +41,7 @@ function hashPassword(password, salt) {
 // Default settings (Pre-hashed admin123 password)
 const defaultHashObj = hashPassword('admin123');
 const DEFAULT_SETTINGS = {
+  defaultHotkey: "",
   webPort: 8080,
   webUser: 'admin',
   webPassHash: defaultHashObj.hash,
