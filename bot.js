@@ -904,6 +904,21 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
     try {
       const netuid = Number(args.netuid?.toString() || args[0]?.toString());
       if (Number.isFinite(netuid) && netuid > 0) {
+        // 🔒 安全保护：校验交易发送者是否为该子网 the actual owner (Owner)
+        let expectedOwner = subnetOwnersCache.get(netuid);
+        if (!expectedOwner) {
+          try {
+            const ownerObj = await api.query.subtensorModule.subnetOwner(netuid);
+            expectedOwner = ownerObj?.toString();
+          } catch (err) {
+            log('WARN', `[新子网打新] 缓存和链上均无法获取子网 #${netuid} 的所有者，跳过所有者校验。`);
+          }
+        }
+        if (expectedOwner && signer && signer !== expectedOwner) {
+          log('WARN', `[新子网打新] 过滤非所有者发起的非法 startCall 交易：子网 #${netuid} 的实际所有者为 ${expectedOwner}，但提交者为 ${signer}`);
+          return true; // 返回 true 表示交易已处理完毕（直接过滤忽略）
+        }
+
         const actionKey = `startCall:${netuid}`;
         if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
@@ -1717,8 +1732,8 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
   const successKey = `新子网打新:${netuid}:${targetHotkey}:${isDoubleStaking ? 'DoubleStaking' : 'Primary'}`;
   
-  // 2. 24小时冷却时间校验（持久化，不受重启影响，不管成功与否）
-  const cooldownKey = `new-subnet:${netuid}`;
+  // 2. 24小时冷却时间校验（主打新与二次打新冷却是分开独立的）
+  const cooldownKey = isDoubleStaking ? `new-subnet-double:${netuid}` : `new-subnet:${netuid}`;
   const cooldown = database.getCooldown(cooldownKey);
   let shouldWriteCooldown = false;
 
@@ -1727,8 +1742,8 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     if (elapsed < 24 * 60 * 60 * 1000) {
       if (Math.abs(currentBlockHeight - cooldown.block) <= 10) {
         shouldWriteCooldown = false; // 同一次事件兜底，不刷新冷却
-      } else if (!isDoubleStaking) {
-        log('INFO', `[新子网打新] [触发源: ${triggerSource}] 检测到子网 #${netuid} 在 24 小时冷却时间内 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，且已超过防抖窗口，跳过重复触发。`);
+      } else {
+        log('INFO', `[新子网打新] [触发源: ${triggerSource}] 检测到子网 #${netuid} 在该策略的 24 小时冷却时间内 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，跳过重复触发。`);
         return;
       }
     } else {
@@ -1869,6 +1884,19 @@ function handleDoubleStaking(netuid, hotkey, source) {
   const settings = database.getSettings();
   const delaySec = Number(settings.dashingDoubleStakingDelay || 0);
   if (delaySec > 0) {
+    // 🔒 安全保护：如果该子网的二次打新已在 24 小时冷却时间内，且超出了防抖窗口（> 10个区块），跳过任务登记。
+    const cooldownKey = `new-subnet-double:${netuid}`;
+    const cooldown = database.getCooldown(cooldownKey);
+    if (cooldown) {
+      const elapsed = Date.now() - cooldown.firstTriggeredAt;
+      if (elapsed < 24 * 60 * 60 * 1000) {
+        if (Math.abs(currentBlockHeight - cooldown.block) > 10) {
+          log('INFO', `[新子网打新] 检测到子网 #${netuid} 已有二次打新 24 小时冷却记录 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，跳过二次延时买入任务注册。`);
+          return;
+        }
+      }
+    }
+
     if (doubleStakingRegistered.has(netuid)) {
       log('INFO', `[新子网打新] 子网 #${netuid} 的二次延时买入任务已在运行，忽略重复注册请求。`);
       return;
