@@ -57,6 +57,7 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: New Subnet Auto Register
   dashingEnabled: true,
+  dashingMevShieldEnabled: false,
   dashingAmount: 100, // TAO to register
   dashingRetries: 10,
   dashingIntervalMs: 1000,
@@ -69,6 +70,7 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,
+  renameMevShieldEnabled: false,
   renameAmount: 100,
   renameTip: 2.0,
   renameSlippageLimit: 0.05, // 5% slippage
@@ -80,6 +82,7 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: Coldkey Swap Frontrun
   swapEnabled: true,
+  swapMevShieldEnabled: false,
   swapAmount: 100,
   swapTip: 5.0,
   swapSlippageLimit: 0.05, // 5% slippage
@@ -100,10 +103,6 @@ const DEFAULT_SETTINGS = {
   
   // Advanced priorities
   allowPartialStaking: true, // allow partial fill on limit orders
-  dynamicTipEnabled: true, // auto outbid competitors in mempool
-  dynamicTipMinDelta: 0.1, // bid this much TAO above competitors
-  replaceByFeeEnabled: true, // auto speed up pending transaction if outbid
-  replaceByFeeMinDelta: 0.1, // delta TAO to add when replacing transaction
   dynamicSlippageEnabled: true, // calculate slippage dynamically based on pool size
   dynamicSlippageSafetyFactor: 0.7, // slippage safety multiplier (70% of expected price impact)
   broadcastNodes: [

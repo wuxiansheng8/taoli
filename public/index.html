@@ -221,6 +221,12 @@
             </div>
             <div class="strategy-settings grid-settings-2-rows">
               <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="strat-dashing-mevshield">
+                  <span class="checkmark"></span> 启用 MEV 加密交易 (MEV Shield)
+                </label>
+              </div>
+              <div class="setting-item">
                 <label>打新金额 (TAO)</label>
                 <input type="number" id="strat-dashing-amount" step="1" min="1">
               </div>
@@ -274,6 +280,12 @@
             </div>
             <div class="strategy-settings grid-settings-2-rows">
               <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="strat-rename-mevshield">
+                  <span class="checkmark"></span> 启用 MEV 加密交易 (MEV Shield)
+                </label>
+              </div>
+              <div class="setting-item">
                 <label>抢跑金额 (TAO)</label>
                 <input type="number" id="strat-rename-amount" step="1" min="1">
               </div>
@@ -321,6 +333,12 @@
               </label>
             </div>
             <div class="strategy-settings grid-settings-2-rows">
+              <div class="setting-item">
+                <label class="checkbox-container">
+                  <input type="checkbox" id="strat-swap-mevshield">
+                  <span class="checkmark"></span> 启用 MEV 加密交易 (MEV Shield)
+                </label>
+              </div>
               <div class="setting-item">
                 <label>抢跑金额 (TAO)</label>
                 <input type="number" id="strat-swap-amount" step="1" min="1">
@@ -418,36 +436,16 @@
           <div class="card glass strategy-card">
             <div class="strategy-header">
               <div class="strategy-title">
-                <h3>⚡ 高级竞价、交易加速与动态滑点设置 (Advanced Bidding, RBF & Slippage)</h3>
-                <p class="card-desc">配置动态小费出价、限价单的部分成交行为、RBF 交易加速重发，以及 AMM 动态滑点计算。</p>
+                <h3>⚡ 部分成交与动态滑点设置 (Partial Fill & Dynamic Slippage)</h3>
+                <p class="card-desc">配置限价单的部分成交行为以及 AMM 动态滑点计算。</p>
               </div>
             </div>
             <div class="strategy-settings inline-settings">
               <div class="setting-item">
                 <label class="checkbox-container">
-                  <input type="checkbox" id="cfg-dynamic-tip-enabled">
-                  <span class="checkmark"></span> 启用动态小费竞价 (根据 Mempool 竞争对手自动上调)
-                </label>
-              </div>
-              <div class="setting-item">
-                <label>竞价上浮步长 (TAO)</label>
-                <input type="number" id="cfg-dynamic-tip-delta" step="0.01" min="0.01" placeholder="例如: 0.1">
-              </div>
-              <div class="setting-item">
-                <label class="checkbox-container">
                   <input type="checkbox" id="cfg-allow-partial-staking">
                   <span class="checkmark"></span> 允许限价单部分成交 (Allow Partial Fill)
                 </label>
-              </div>
-              <div class="setting-item">
-                <label class="checkbox-container">
-                  <input type="checkbox" id="cfg-rbf-enabled">
-                  <span class="checkmark"></span> 启用 RBF 交易加速 (检测到被抢跑时自动以高小费加速重发)
-                </label>
-              </div>
-              <div class="setting-item">
-                <label>加速上浮步长 (TAO)</label>
-                <input type="number" id="cfg-rbf-delta" step="0.01" min="0.01" placeholder="例如: 0.1">
               </div>
               <div class="setting-item">
                 <label class="checkbox-container">

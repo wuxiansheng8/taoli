@@ -1,7 +1,9 @@
 const { ApiPromise, WsProvider, Keyring } = require('@polkadot/api');
-const { cryptoWaitReady } = require('@polkadot/util-crypto');
+const { cryptoWaitReady, xxhashAsU8a } = require('@polkadot/util-crypto');
 const axios = require('axios');
 const WebSocket = require('ws');
+const crypto = require('crypto');
+const { randomBytes } = crypto;
 const database = require('./database');
 
 // Logs buffer and state
@@ -30,10 +32,113 @@ const seenActions = new Map();
 const nextNonceByAddress = new Map();
 const balanceByAddress = new Map();
 const processedNetuids = new Map();
-const maxTipBySubnet = new Map(); // added for dynamic tip bidding
-let maxRegisterNetworkTip = 0; // added for dynamic registerNetwork tip bidding
 const dashingSuccessByNetuid = new Map(); // added for tracking successful snipes
 const activeSnipesByNetuid = new Set(); // added to prevent concurrent duplicate sniping loops
+
+// MEV Shield background keys cache
+let cachedNextKeyBytes = null;
+let cachedNextKeyExpiresAt = 0;
+let hasMevShieldPallet = false;
+
+// Preloaded noble modules
+let ml_kem768 = null;
+let xchacha20poly1305 = null;
+
+async function initNoblePQ() {
+  try {
+    const PQ = await import('@noble/post-quantum/ml-kem.js');
+    ml_kem768 = PQ.ml_kem768;
+    const CH = await import('@noble/ciphers/chacha.js');
+    xchacha20poly1305 = CH.xchacha20poly1305;
+    log('INFO', '成功预加载 @noble/post-quantum 与 @noble/ciphers 模块');
+  } catch (err) {
+    log('ERROR', `预加载 noble post-quantum/ciphers 模块失败: ${err.message}`);
+  }
+}
+
+async function updateMevShieldKeys() {
+  if (!api || !api.isConnected) return;
+  try {
+    hasMevShieldPallet = !!api.query.mevShield;
+    if (!hasMevShieldPallet) return;
+
+    if (api.query.mevShield.nextKey) {
+      const keyObj = await api.query.mevShield.nextKey();
+      if (keyObj.isSome) {
+        cachedNextKeyBytes = keyObj.unwrap();
+        
+        if (api.query.mevShield.nextKeyExpiresAt) {
+          const expiresObj = await api.query.mevShield.nextKeyExpiresAt();
+          cachedNextKeyExpiresAt = Number(expiresObj.toString());
+        } else {
+          cachedNextKeyExpiresAt = currentBlockHeight + 100; // 兜底生存期
+        }
+      } else {
+        cachedNextKeyBytes = null;
+        cachedNextKeyExpiresAt = 0;
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to update MEV Shield keys:', e.message);
+  }
+}
+
+async function getMevShieldSuccess(blockHash, targetId) {
+  try {
+    const apiAt = await api.at(blockHash);
+    const events = await apiAt.query.system.events();
+    
+    let ourQueueIndex = -1;
+    let submitCount = 0;
+    
+    // A. 遍历全局事件，寻找所有 EncryptedSubmitted 以确定我们在区块解密队列中的索引
+    for (const { phase, event } of events) {
+      if (phase.isApplyExtrinsic && event.section === 'mevShield' && event.method === 'EncryptedSubmitted') {
+        const idVal = event.data.id || event.data[0];
+        if (idVal && idVal.toString() === targetId) {
+          ourQueueIndex = submitCount;
+          break;
+        }
+        submitCount++;
+      }
+    }
+    
+    if (ourQueueIndex === -1) {
+      return { success: false, error: 'MevShield queue index tracking failed: EncryptedSubmitted not found' };
+    }
+    
+    // B. 定位 Finalization 阶段中与该队列索引相匹配的内层执行结果事件
+    for (const { phase, event } of events) {
+      if (phase.toString() === 'Finalization' && event.section === 'mevShield') {
+        const indexVal = event.data.index || event.data[0];
+        if (indexVal && Number(indexVal.toString()) === ourQueueIndex) {
+          if (event.method === 'ExtrinsicDispatched') {
+            return { success: true };
+          } else if (event.method === 'ExtrinsicDispatchFailed') {
+            let errorMsg = 'Inner transaction dispatch failed';
+            const errorVal = event.data.error || event.data[1];
+            if (errorVal) {
+              if (errorVal.isModule) {
+                const decoded = api.registry.findMetaError(errorVal.asModule);
+                errorMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
+              } else {
+                errorMsg = errorVal.toString();
+              }
+            }
+            return { success: false, error: errorMsg };
+          } else if (event.method === 'ExtrinsicDecodeFailed') {
+            return { success: false, error: 'Inner transaction decoding failed (bad ciphertext)' };
+          } else if (event.method === 'ExtrinsicExpired') {
+            return { success: false, error: 'Inner transaction expired' };
+          }
+        }
+      }
+    }
+  } catch (err) {
+    return { success: false, error: `Failed to inspect events: ${err.message}` };
+  }
+  return { success: false, error: 'Inner transaction status unresolved in Finalization' };
+}
 
 // Subnet Owner, Hotkey & Registration Block Cache (to bypass RPC network queries during critical frontrunning path)
 const subnetOwnersCache = new Map();
@@ -41,8 +146,7 @@ const subnetHotkeysCache = new Map();
 const subnetRegisteredAtCache = new Map();
 let successfulSyncCount = 0;
 
-// RBF & Multi-Node Broadcast State
-const activePendingTxs = new Map(); // nonceKey -> pending details
+// Multi-Node Broadcast State
 const broadcastProviders = new Map(); // url -> WsProvider
 const broadcastStatuses = new Map(); // url -> { status, latency }
 const activeTimeoutRetryNumByWallet = new Map(); // netuid:walletName -> attemptNumber
@@ -505,58 +609,45 @@ function getWalletsStatus() {
   });
 }
 
-// Local Nonce management
-function reserveNonce(address) {
+// Local Nonce management supporting single and double reservation
+function reserveNonce(address, isDouble = false) {
   const nextNonce = nextNonceByAddress.get(address);
   if (nextNonce === undefined || isNaN(nextNonce)) return null;
-  nextNonceByAddress.set(address, nextNonce + 1);
-  return nextNonce;
+  if (isDouble) {
+    nextNonceByAddress.set(address, nextNonce + 2);
+    return { outer: nextNonce, inner: nextNonce + 1 };
+  } else {
+    nextNonceByAddress.set(address, nextNonce + 1);
+    return nextNonce;
+  }
 }
 
-// Send transaction helper
-// Send transaction helper
-async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
+// 低层：轻量级 Extrinsic 签名与广播（纯事务发送器）
+async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null) {
   return new Promise(async (resolve) => {
     let unsubscribe = null;
     let settled = false;
     const address = pair.address;
-    
-    // Check if we use a forced nonce (for RBF speedup) or reserve a new one
-    const reservedNonce = (meta && meta.nonce !== undefined) ? meta.nonce : reserveNonce(address);
-    
-    const options = { era: 0 };
-    if (reservedNonce !== null) options.nonce = reservedNonce;
-    if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
 
-    const nonceKey = `${address}:${reservedNonce}`;
-    const settings = database.getSettings();
-    
-    // If it's a new transaction (not a speedup itself) and RBF is enabled, track it
-    if (meta && settings.replaceByFeeEnabled) {
-      activePendingTxs.set(nonceKey, {
-        nonce: reservedNonce,
-        pair,
-        tip,
-        netuid: meta.netuid,
-        hotkey: meta.hotkey,
-        amountBigInt: meta.amountBigInt,
-        slippageLimit: meta.slippageLimit,
-        label: meta.label,
-        sentAt: Date.now()
-      });
+    const reservedNonce = nonce !== null ? nonce : reserveNonce(address);
+    if (reservedNonce === null) {
+      log('ERROR', `❌ [交易终止] 钱包【${address.slice(-6)}】本地 Nonce 未就绪，中止发送交易！`);
+      return resolve({ success: false, error: 'Local nonce not ready' });
     }
+
+    const options = { era: 0 };
+    options.nonce = reservedNonce;
+    if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
 
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      activePendingTxs.delete(nonceKey);
       if (typeof unsubscribe === 'function') unsubscribe();
       resolve(result);
     };
 
     const timeout = setTimeout(() => {
-      // Re-sync nonce if timeout occurs
       api.rpc.system.accountNextIndex(address)
         .then(n => nextNonceByAddress.set(address, Number(n.toString())))
         .catch(() => {});
@@ -564,22 +655,15 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
     }, txTimeoutMs);
 
     try {
-      // Sign the transaction asynchronously
       await tx.signAsync(pair, options);
       const signedTxHex = tx.toHex();
 
       const callDetails = `${tx.method.section}.${tx.method.method}`;
-      let callArgs = 'unknown';
-      try {
-        callArgs = JSON.stringify(tx.method.toHuman().args);
-      } catch (argsErr) {}
-      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails}，参数: ${callArgs}，Nonce: ${reservedNonce}，Tip: ${tip} TAO`);
+      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails}, Nonce: ${reservedNonce}, Tip: ${tip} TAO`);
 
-      // Parallel broadcast to all connected broadcast nodes
       broadcastSignedTx(signedTxHex);
 
-      // Send pre-signed transaction via main node and subscribe
-      tx.send(({ status, dispatchError }) => {
+      tx.send(({ status, events, dispatchError }) => {
         if (status.isInBlock || status.isFinalized) {
           refreshWalletState(address).catch(() => {});
           if (dispatchError) {
@@ -590,7 +674,13 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
             }
             finish({ success: false, error: errorInfo });
           } else {
-            finish({ success: true, hash: tx.hash.toHex() });
+            const blockHash = status.isInBlock ? status.asInBlock : status.asFinalized;
+            finish({ 
+              success: true, 
+              hash: tx.hash.toHex(),
+              blockHash: blockHash.toHex(),
+              events: events || []
+            });
           }
         } else if (status.isError) {
           api.rpc.system.accountNextIndex(address)
@@ -614,6 +704,141 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
       finish({ success: false, error: `Signing failed: ${err.message}` });
     }
   });
+}
+
+// 核心层：MEV Shield 加密处理器 (双 Nonce 申请 -> 内层签名获取哈希 -> 加密提交 -> 全局解耦事件校验)
+async function sendMevShieldTx(innerTx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
+  const address = pair.address;
+
+  // A. 密钥与 Noble 库检查
+  const keysExpired = cachedNextKeyExpiresAt > 0 && currentBlockHeight >= cachedNextKeyExpiresAt;
+  const cannotEncrypt = !hasMevShieldPallet || !cachedNextKeyBytes || keysExpired || !ml_kem768;
+
+  if (cannotEncrypt) {
+    const reason = !hasMevShieldPallet ? '链上未启用 mevShield 模块' :
+                   keysExpired ? `密钥已过期 (当前高度: #${currentBlockHeight}, 失效高度: #${cachedNextKeyExpiresAt})` :
+                   '未获取到有效加密公钥或 noble 库未就绪';
+    log('WARN', `⚠️ [MEV安全降级] 自动安全降级为明文发送！原因: "${reason}"`);
+    return sendTx(innerTx, pair, txTimeoutMs, tip);
+  }
+
+  // B. 申请双 Nonce
+  const doubleNonce = reserveNonce(address, true);
+  if (!doubleNonce || doubleNonce.outer === null || doubleNonce.inner === null) {
+    log('WARN', `⚠️ [MEV安全降级] 钱包【${address.slice(-6)}】双 Nonce 分配失败，自动降级为明文发送！`);
+    return sendTx(innerTx, pair, txTimeoutMs, tip);
+  }
+
+  const { outer: outerNonce, inner: innerNonce } = doubleNonce;
+  let encryptionSuccessful = false;
+  let innerSignedHash = null;
+  let outerTx = null;
+
+  try {
+    // 签名内层交易 (Immortal 签名)
+    const innerOptions = { nonce: innerNonce, era: 0 };
+    await innerTx.signAsync(pair, innerOptions);
+    
+    // 【从这里明确导出内层交易签名哈希】
+    innerSignedHash = innerTx.hash.toHex();
+    const innerTxBytes = innerTx.toU8a();
+
+    // 核心 PQ 加密
+    const keyHash = xxhashAsU8a(cachedNextKeyBytes, 128);
+    const { cipherText: kemCt, sharedSecret } = ml_kem768.encapsulate(cachedNextKeyBytes);
+    const nonceBytes = randomBytes(24);
+    const cipher = xchacha20poly1305(sharedSecret, nonceBytes);
+    const aeadCt = cipher.encrypt(innerTxBytes);
+
+    const kemLenBuf = Buffer.alloc(2);
+    kemLenBuf.writeUInt16LE(kemCt.length);
+
+    const packedCiphertext = Buffer.concat([
+      Buffer.from(keyHash),
+      kemLenBuf,
+      Buffer.from(kemCt),
+      Buffer.from(nonceBytes),
+      Buffer.from(aeadCt)
+    ]);
+
+    const ciphertextHex = '0x' + packedCiphertext.toString('hex');
+
+    // 生成 submitEncrypted 外层交易
+    outerTx = api.tx.mevShield.submitEncrypted(ciphertextHex);
+    encryptionSuccessful = true;
+  } catch (err) {
+    log('ERROR', `❌ [MEV加密失败] 自动回退明文交易发送: ${err.message}`);
+    // 修正内存中的 Nonce 追踪：因为明文只用 1 个 nonce，下一个 nonce 应该为 outerNonce + 1
+    nextNonceByAddress.set(address, outerNonce + 1);
+    // 使用 outerNonce 发送明文交易以维持 nonce 序列的连续性
+    return sendTx(innerTx, pair, txTimeoutMs, tip, outerNonce);
+  }
+
+  // C. 调用底层发送器发送外层加密包装交易
+  const sendRes = await sendTx(outerTx, pair, txTimeoutMs, tip, outerNonce);
+  if (!sendRes.success) {
+    return sendRes;
+  }
+
+  // D. 外层发送成功，匹配解耦的区块事件以确定内层执行成败
+  let targetId = null;
+  if (sendRes.events && sendRes.events.length > 0) {
+    const submittedEvent = sendRes.events.find(({ event }) => event.section === 'mevShield' && event.method === 'EncryptedSubmitted');
+    if (submittedEvent) {
+      const idVal = submittedEvent.event.data.id || submittedEvent.event.data[0];
+      if (idVal) targetId = idVal.toString();
+    }
+  }
+
+  if (!targetId) {
+    return { success: false, error: 'MevShield execution verification failed: EncryptedSubmitted event not captured' };
+  }
+
+  const checkRes = await getMevShieldSuccess(sendRes.blockHash, targetId);
+  if (checkRes.success) {
+    return {
+      success: true,
+      hash: sendRes.hash,
+      outerHash: sendRes.hash,
+      innerHash: innerSignedHash,
+      isEncrypted: true
+    };
+  } else {
+    return { success: false, error: checkRes.error };
+  }
+}
+
+// 路由器层：策略路由分配器
+async function sendStrategicTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
+  const settings = database.getSettings();
+  let shouldEncrypt = false;
+  
+  if (meta && meta.label) {
+    const label = meta.label;
+    if (label.startsWith('新子网打新') || label.startsWith('打新')) {
+      shouldEncrypt = !!settings.dashingMevShieldEnabled;
+    } else if (label.startsWith('改名抢跑')) {
+      shouldEncrypt = !!settings.renameMevShieldEnabled;
+    } else if (label.startsWith('冷键交换抢跑')) {
+      shouldEncrypt = !!settings.swapMevShieldEnabled;
+    }
+  }
+
+  if (shouldEncrypt) {
+    return sendMevShieldTx(tx, pair, txTimeoutMs, tip, meta);
+  } else {
+    const res = await sendTx(tx, pair, txTimeoutMs, tip);
+    if (res.success) {
+      return {
+        success: true,
+        hash: res.hash,
+        outerHash: res.hash,
+        innerHash: null,
+        isEncrypted: false
+      };
+    }
+    return res;
+  }
 }
 
 // Extrinsic parser to map values using metadata names
@@ -827,21 +1052,7 @@ async function buildUnstakeTx(hotkey, netuid, amountBigInt, slippageLimit) {
   return api.tx.subtensorModule.removeStake(hotkey, netuid, amountBigInt);
 }
 
-// Dynamic tip outbidding logic
-function calculateDynamicTip(netuid, baseTip) {
-  const settings = database.getSettings();
-  if (!settings.dynamicTipEnabled) return baseTip;
-  
-  const maxMempoolTip = maxTipBySubnet.get(netuid) || 0;
-  if (maxMempoolTip > 0) {
-    const biddingTip = maxMempoolTip + (settings.dynamicTipMinDelta || 0.1);
-    if (biddingTip > baseTip) {
-      log('INFO', `[动态小费] 检测到交易池竞争，自动上浮小费: ${baseTip.toFixed(2)} TAO -> ${biddingTip.toFixed(2)} TAO (竞争对手最高小费: ${maxMempoolTip.toFixed(2)} TAO)`);
-      return biddingTip;
-    }
-  }
-  return baseTip;
-}
+
 
 // Strategy triggers and pending states
 const doubleStakingRegistered = new Set(); // 严格控制每个 netuid 仅注册一个二次定时器
@@ -1459,9 +1670,9 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
     dashingSuccessByNetuid.set(successKey, false);
   }
 
-  const targetTip = calculateDynamicTip(netuid, tip);
+  const targetTip = tip;
   log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
-  sendTelegramAlert(`🚀 [${label} 触发]\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
+  sendTelegramAlert(`🚀 [${label} 触发]\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms\n加密状态: 按照策略开关选择`);
 
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
   const txPromises = [];
@@ -1481,7 +1692,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
             const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
             log('INFO', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
 
-            const p = sendTx(tx, w.pair, timeoutMs, targetTip, {
+            const p = sendStrategicTx(tx, w.pair, timeoutMs, targetTip, {
               netuid,
               hotkey,
               amountBigInt,
@@ -1489,9 +1700,16 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
               label: `${label}-轮次${attempt + 1}-并发#${i + 1}`
             }).then(res => {
               if (res.success) {
-                log('SUCCESS', `[${label} 成功] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
+                const hashLog = res.isEncrypted 
+                  ? `加密外层哈希: ${res.outerHash}, 内层哈希: ${res.innerHash}`
+                  : `交易哈希: ${res.hash}`;
+                log('SUCCESS', `[${label} 成功] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！${hashLog}`);
                 dashingSuccessByNetuid.set(successKey, true);
-                sendTelegramAlert(`✅ [${label} 成功]\n钱包: ${w.name}\n子网: #${netuid}\n交易哈希: ${res.hash}`);
+                
+                const hashAlert = res.isEncrypted
+                  ? `加密外层哈希 (Outer): ${res.outerHash}\n内层真实哈希 (Inner): ${res.innerHash}`
+                  : `交易哈希: ${res.hash}`;
+                sendTelegramAlert(`✅ [${label} 成功]\n钱包: ${w.name}\n子网: #${netuid}\n${hashAlert}`);
                 return res;
               } else {
                 log('ERROR', `[${label} 失败] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
@@ -1552,12 +1770,12 @@ async function executeSandwichBuy(netuid, hotkey, amountTao, tip, slippageLimit)
   
   const w = activeWallets[0];
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
-  const targetTip = calculateDynamicTip(netuid, tip);
+  const targetTip = tip;
   
   try {
     const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
-    log('INFO', `[三明治套利] 发起前置抢跑买入 -> 钱包: ${w.name}, 小费: ${targetTip} TAO`);
-    const res = await sendTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip, {
+    log('INFO', `[三明治套利] 发起前置抢跑买入 -> 钱包: ${w.name}, 小费: ${targetTip} TAO (明文发送)`);
+    const res = await sendStrategicTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip, {
       netuid,
       hotkey,
       amountBigInt,
@@ -1565,7 +1783,7 @@ async function executeSandwichBuy(netuid, hotkey, amountTao, tip, slippageLimit)
       label: '三明治套利买入'
     });
     if (res.success) {
-      log('SUCCESS', `[三明治套利] 前置买入成功！Hash: ${res.hash}`);
+      log('SUCCESS', `[三明治套利] 前置买入成功！交易哈希: ${res.hash}`);
       return true;
     } else {
       log('ERROR', `[三明治套利] 前置买入失败: ${res.error}`);
@@ -1585,7 +1803,7 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
   if (activeWallets.length === 0) return;
   
   const w = activeWallets[0];
-  const targetTip = calculateDynamicTip(netuid, tip);
+  const targetTip = tip;
   
   // Query actual Alpha stake balance of the wallet on the subnet
   let stakeRao = 0n;
@@ -1611,9 +1829,9 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
   try {
     const tx = await buildUnstakeTx(hotkey, netuid, stakeRao, settings.sandwichSlippageLimit);
     log('INFO', `[三明治套利] 发起后置卖出 -> 钱包: ${w.name}, 数量: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha, 小费: ${targetTip} TAO`);
-    const res = await sendTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip);
+    const res = await sendStrategicTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip);
     if (res.success) {
-      log('SUCCESS', `[三明治套利] 后置卖出回补成功！套利完成！Hash: ${res.hash}`);
+      log('SUCCESS', `[三明治套利] 后置卖出回补成功！套利完成！交易哈希: ${res.hash}`);
       sendTelegramAlert(`🎉 [三明治套利成功]\n钱包: ${w.name}\n子网: #${netuid}\n卖出数量: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha\n卖出交易哈希: ${res.hash}`);
     } else {
       log('ERROR', `[三明治套利] 后置卖出失败: ${res.error}`);
@@ -1660,12 +1878,12 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
   const actualTimeoutMs = customTimeoutMs !== null ? customTimeoutMs : (settings.dashingTimeoutMs || 30000);
   
   try {
-    const targetTip = calculateDynamicTip(netuid, actualTip);
+    const targetTip = actualTip;
     const amountBigInt = BigInt(Math.floor(actualAmount * 1e9));
     const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit);
     
     const p = new Promise((resolve) => {
-      sendTx(tx, w.pair, actualTimeoutMs, targetTip, {
+      sendStrategicTx(tx, w.pair, actualTimeoutMs, targetTip, {
         netuid,
         hotkey: targetHotkey,
         amountBigInt,
@@ -1673,9 +1891,16 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
         label: `${label}-超时重试#${attemptNum}`
       }).then(res => {
         if (res.success) {
-          log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！Hash: ${res.hash}`);
+          const hashLog = res.isEncrypted 
+            ? `加密外层哈希: ${res.outerHash}, 内层哈希: ${res.innerHash}`
+            : `交易哈希: ${res.hash}`;
+          log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！${hashLog}`);
           dashingSuccessByNetuid.set(successKey, true);
-          sendTelegramAlert(`✅ [${label} 超时重试成功]\n钱包: ${w.name}\n子网: #${netuid}\n重试次数: ${attemptNum}\n交易哈希: ${res.hash}`);
+          
+          const hashAlert = res.isEncrypted
+            ? `加密外层哈希 (Outer): ${res.outerHash}\n内层真实哈希 (Inner): ${res.innerHash}`
+            : `交易哈希: ${res.hash}`;
+          sendTelegramAlert(`✅ [${label} 超时重试成功]\n钱包: ${w.name}\n子网: #${netuid}\n重试次数: ${attemptNum}\n${hashAlert}`);
           resolve(res);
         } else {
           log('ERROR', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】交易失败: ${res.error}`);
@@ -1786,7 +2011,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   // 收集所有异步发出的交易 Promise，以实现动态解锁
   const txPromises = [];
 
-  const targetTip = calculateDynamicTip(netuid, settings.dashingTip);
+  const targetTip = settings.dashingTip;
   const burstCount = Math.max(1, settings.dashingBurstCount || 1);
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
@@ -1812,7 +2037,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
             log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
-            const p = sendTx(tx, w.pair, settings.dashingTimeoutMs, targetTip, {
+            const p = sendStrategicTx(tx, w.pair, settings.dashingTimeoutMs, targetTip, {
               netuid,
               hotkey: targetHotkey,
               amountBigInt,
@@ -1820,10 +2045,17 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`
             }).then(res => {
               if (res.success) {
-                log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
+                const hashLog = res.isEncrypted 
+                  ? `加密外层哈希: ${res.outerHash}, 内层哈希: ${res.innerHash}`
+                  : `交易哈希: ${res.hash}`;
+                log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！${hashLog}`);
                 // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
                 dashingSuccessByNetuid.set(successKey, true);
-                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
+                
+                const hashAlert = res.isEncrypted
+                  ? `加密外层哈希 (Outer): ${res.outerHash}\n内层真实哈希 (Inner): ${res.innerHash}`
+                  : `交易哈希: ${res.hash}`;
+                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n${hashAlert}`);
                 return res;
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
@@ -1971,15 +2203,10 @@ async function poll() {
   try {
     const pendingHexs = await api.rpc.author.pendingExtrinsics();
     if (!pendingHexs || pendingHexs.length === 0) {
-      maxTipBySubnet.clear();
-      maxRegisterNetworkTip = 0;
       return;
     }
     
     const now = Date.now();
-    
-    maxTipBySubnet.clear();
-    let currentMaxRegisterTip = 0;
     
     // Seen hashes TTL cleanup (5 minutes window)
     for (const [hash, entry] of seenHashes.entries()) {
@@ -2013,19 +2240,7 @@ async function poll() {
           netuid = parsed.args[1].toNumber();
         }
 
-        if (netuid !== null && parsed.tipTao > 0) {
-          const currentMax = maxTipBySubnet.get(netuid) || 0;
-          if (parsed.tipTao > currentMax) {
-            maxTipBySubnet.set(netuid, parsed.tipTao);
-          }
-        }
-
         const isReg = /^register(_)?network$/i.test(parsed.callName);
-        if (isReg && parsed.tipTao > 0) {
-          if (parsed.tipTao > currentMaxRegisterTip) {
-            currentMaxRegisterTip = parsed.tipTao;
-          }
-        }
 
         const hashEntry = seenHashes.get(parsed.txHash);
         if (hashEntry) {
@@ -2056,40 +2271,6 @@ async function poll() {
         // Silent error
       }
     }
-    
-    // RBF Speed-Up Check
-    const settings = database.getSettings();
-    if (settings.replaceByFeeEnabled && activePendingTxs.size > 0) {
-      for (const [nonceKey, pending] of activePendingTxs.entries()) {
-        if (now - pending.sentAt > 60 * 1000) {
-          activePendingTxs.delete(nonceKey);
-          continue;
-        }
-
-        const maxMempoolTip = maxTipBySubnet.get(pending.netuid) || 0;
-        if (maxMempoolTip > pending.tip) {
-          const targetTip = maxMempoolTip + (settings.replaceByFeeMinDelta || 0.1);
-          
-          activePendingTxs.delete(nonceKey);
-          log('INFO', `[RBF交易加速] 监测到子网 #${pending.netuid} 竞争对手小费 (${maxMempoolTip.toFixed(2)} TAO) 超过我们 (${pending.tip.toFixed(2)} TAO)。正在使用相同 Nonce (${pending.nonce}) 以更高小费 (${targetTip.toFixed(2)} TAO) 加速重发！`);
-          
-          buildStakeTx(pending.hotkey, pending.netuid, pending.amountBigInt, pending.slippageLimit).then(newTx => {
-            sendTx(newTx, pending.pair, 15000, targetTip, {
-              nonce: pending.nonce,
-              netuid: pending.netuid,
-              hotkey: pending.hotkey,
-              amountBigInt: pending.amountBigInt,
-              slippageLimit: pending.slippageLimit,
-              label: `${pending.label}(RBF加速)`
-            });
-          }).catch(e => {
-            log('ERROR', `[RBF交易加速] 重建加速交易失败: ${e.message}`);
-          });
-        }
-      }
-    }
-
-    maxRegisterNetworkTip = currentMaxRegisterTip;
   } catch (e) {
     const now = Date.now();
     if (now - lastMempoolErrorTime > 60000) { // Log once per minute to prevent flooding
@@ -2277,6 +2458,7 @@ async function connectWs(reason = 'Normal Boot') {
 
     log('INFO', '[API初始化] 正在配置多节点广播组件并启动节点延迟测试...');
     initBroadcastNodes();
+    await initNoblePQ();
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
     if (broadcastLatencyTimer) clearInterval(broadcastLatencyTimer);
     broadcastLatencyTimer = setInterval(testBroadcastNodes, 10000);
@@ -2289,6 +2471,7 @@ async function connectWs(reason = 'Normal Boot') {
       if (generation !== connectGeneration || botStatus === 'Stopped') return;
       const blockNumber = header.number.toNumber();
       currentBlockHeight = blockNumber;
+      updateMevShieldKeys().catch(() => {});
       if (global.blockCallback) {
         global.blockCallback(blockNumber);
       }
