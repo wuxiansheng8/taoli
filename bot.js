@@ -836,18 +836,18 @@ function calculateDynamicTip(netuid, baseTip) {
 }
 
 // Strategy triggers and pending states
-let pendingNewSubnet = null; // Staking Snipe target: { netuid, hotkey, detectedAt }
+const doubleStakingRegistered = new Set(); // 严格控制每个 netuid 仅注册一个二次定时器
 let pendingSandwichSell = null;
 
 // Core extrinsic execution triggers
-async function handlePendingExtrinsic(parsed) {
+async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
   const { callName, args, txHash, signer } = parsed;
   const settings = database.getSettings();
   const now = Date.now();
 
   const normalizedCall = callName.toLowerCase();
 
-  // 1. registerNetwork / register_network -> 新子网 Staking 抢购
+  // 1. registerNetwork / register_network -> 仅仅发送 TG 注册及清算警报，不做 Staking 买入
   if (/^register(_)?network$/i.test(normalizedCall)) {
     if (!settings.dashingEnabled) return true;
     
@@ -867,103 +867,53 @@ async function handlePendingExtrinsic(parsed) {
         targetNetuid = candidate;
       }
 
-      const targetHotkey = args.hotkey?.toString() || args[0]?.toString();
-      
-      if (targetNetuid !== null && targetHotkey) {
-        let hotkeyExists = false;
-        // 🔒 安全保护：Hotkey 拥有者关系校验 + Nonce/余额多级校验，防止误买旧子网
-        try {
-          const ownerQuery = api.query.subtensorModule.owner || api.query.subtensorModule.Owner;
-          if (!ownerQuery || typeof ownerQuery.key !== 'function') {
-            log('WARN', `[新子网打新] 拦截抢购：无法获取 subtensorModule.owner 查询接口，保守拦截以防误买。`);
-            return true;
-          }
-
-          const ownerKey = ownerQuery.key(targetHotkey);
-          const rawOwner = await api.rpc.state.getStorage(ownerKey);
-          hotkeyExists = rawOwner !== null && rawOwner !== undefined && !rawOwner.isEmpty;
-
-          if (hotkeyExists) {
-            const ownerVal = await ownerQuery(targetHotkey);
-            const ownerAddress = ownerVal.toString();
-
-            // 情况 B：Hotkey 已存在，但 owner 不等于当前注册人 signer (注册必定失败)
-            if (ownerAddress !== signer) {
-              log('WARN', `[新子网打新] 过滤/拦截无效注册交易：Hotkey ${targetHotkey} 属于 ${ownerAddress}，并非当前注册人 ${signer}`);
-              return true; // 拦截，跳过抢购
-            }
-
-            // 情况 C：Hotkey 已存在，且 owner == signer (存在旧子网冲突风险，启动严格校验)
-            log('INFO', `[新子网打新] 检测到 Hotkey ${targetHotkey} 全局已存在且归属正确。启动 Nonce 和链上余额双重安全校验...`);
-
-            // ①. 校验 Nonce 连续性 (必须 is 当前 nextNonce)
-            const regAccount = await api.query.system.account(signer);
-            const nextNonce = Number(regAccount.nonce.toString());
-            if (parsed.nonce !== null && parsed.nonce !== nextNonce) {
-              log('WARN', `[新子网打新] 拦截未来 Nonce 交易: Signer: ${signer}, 交易 Nonce: ${parsed.nonce}, 链上 Next Nonce: ${nextNonce}`);
-              return true; // 拦截
-            }
-
-            // ②. 校验链上当前可用余额是否足够支付 Lock Cost
-            const providerInstance = api.rpc.provider || (api._rpcCore && api._rpcCore.provider);
-            if (!providerInstance || typeof providerInstance.send !== 'function') {
-              log('WARN', `[新子网打新] 拦截抢购：RPC Provider 接口不可用，无法查询 Lock Cost。`);
-              return true; // 拦截
-            }
-
-            const lockCostVal = await providerInstance.send('subnetInfo_getLockCost', [null]);
-            if (!lockCostVal) {
-              log('WARN', `[新子网打新] 拦截抢购：查询 subnetInfo_getLockCost 返回空值。`);
-              return true; // 拦截
-            }
-
-            const lockCostRao = BigInt(lockCostVal.toString());
-            const regFreeBalance = BigInt(regAccount.data.free.toString());
-
-            if (regFreeBalance < lockCostRao) {
-              log('WARN', `[新子网打新] 拦截当前可用余额不足交易: Signer: ${signer}, 链上余额: ${(Number(regFreeBalance) / 1e9).toFixed(2)} TAO, 需锁仓: ${(Number(lockCostRao) / 1e9).toFixed(2)} TAO`);
-              return true; // 拦截
-            }
-          } else {
-            // 情况 A：Hotkey 全局不存在
-            // 提前 addStake 即使排在最前面，也会因为 HotKeyAccountNotExists 失败，无误买旧子网的风险，放行极速打新！
-            log('INFO', `[新子网打新] Hotkey ${targetHotkey} 全局不存在，确认无误买风险，放行极速打新！`);
-          }
-        } catch (checkErr) {
-          log('WARN', `[新子网打新] 执行多级安全校验时发生异常: ${checkErr.message}，已安全拦截抢购。`);
-          return true; // 发生异常时，安全拦截，跳过抢购
-        }
-
+      if (targetNetuid !== null) {
         const actionKey = `dashing:${targetNetuid}`;
         if (seenActions.has(actionKey)) return true;
         seenActions.set(actionKey, now);
 
-        // 无论是全新还是已存热键，都在内存中登记 pendingNewSubnet，确保兜底生效
-        pendingNewSubnet = {
-          netuid: targetNetuid,
-          hotkey: targetHotkey,
-          detectedAt: now
-        };
-
-        if (hotkeyExists) {
-          log('WARN', `[新子网打新] 检测到 Hotkey ${targetHotkey} 全局已存在。为防止同名回收或跨子网混淆风险，跳过 Mempool 立即开火，登记 Memory-Fallback，等待下个区块头后再补打，降低排在注册交易前面的风险。`);
-          return true; // 结束 Mempool 触发
-        }
-
-        log('INFO', `[新子网打新] 扫到他人提交注册交易。预测 netuid #${targetNetuid}，提取到新子网目标 hotkey: ${targetHotkey}。且该 Hotkey 全局不存在，确认无误买风险，立即启动极速 Mempool Staking 抢单！`);
+        const isPruning = numSubnets >= 128;
+        const oldName = isPruning ? (subnetNamesCache.get(targetNetuid) || '未知') : '';
+        const pruneMsg = isPruning 
+          ? `🚨 [新子网注册 - 扫入交易池]\n检测到新子网提交注册！预计清算并替代子网: SN${targetNetuid} (原名称: ${oldName})\n请做好准备，等待 startCall 交易以激活抢跑 Staking！`
+          : `🚨 [新子网注册 - 扫入交易池]\n检测到新子网提交注册！空闲槽位: SN${targetNetuid}\n请做好准备，等待 startCall 交易以激活抢跑 Staking！`;
         
-        // 立即执行极速抢单，并在后台进行重试与并发
-        executeStakingSniping(targetNetuid, targetHotkey, 'Mempool').catch(e => {
-          log('ERROR', `[新子网打新] 触发极速抢购失败: ${e.message}`);
-        });
-
+        log('WARN', pruneMsg);
+        sendTelegramAlert(pruneMsg).catch(() => {});
         return true;
-      } else {
-        log('WARN', `[新子网打新] 扫到注册网络交易，但无法解析目标 netuid (${targetNetuid}) 或 hotkey (${targetHotkey})`);
-        return false;
       }
     } catch (e) {
-      log('ERROR', `处理新子网打新判断错误: ${e.message}`);
+      log('ERROR', `处理新子网注册提醒判断错误: ${e.message}`);
+      return true;
+    }
+  }
+  // 1b. startCall / start_call -> 策略 1 真正执行 Staking 抢购
+  if (/^(start(_)?call)$/i.test(normalizedCall)) {
+    if (!settings.dashingEnabled) return true;
+    try {
+      const netuid = Number(args.netuid?.toString() || args[0]?.toString());
+      if (Number.isFinite(netuid) && netuid > 0) {
+        const actionKey = `startCall:${netuid}`;
+        if (seenActions.has(actionKey)) return true;
+        seenActions.set(actionKey, now);
+
+        const targetHotkey = await resolveHotkey(netuid);
+        if (targetHotkey) {
+          const triggerSrc = `${fallbackSource}-startCall`;
+          log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
+          executeStakingSniping(netuid, targetHotkey, triggerSrc).catch(e => {
+            log('ERROR', `[新子网打新] 触发 startCall 抢购失败: ${e.message}`);
+          });
+          
+          // 执行二次延迟交易逻辑 - 倒计时起点为检测到 startCall 的这一瞬间
+          handleDoubleStaking(netuid, targetHotkey, fallbackSource);
+        } else {
+          log('WARN', `[新子网打新] 扫到 startCall 激活交易，但全局默认 Hotkey 未配置，取消抢跑。`);
+        }
+      }
+      return true;
+    } catch (e) {
+      log('ERROR', `处理 startCall 抢跑判断错误: ${e.message}`);
       return false;
     }
   }
@@ -1286,7 +1236,11 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       /^subtensor(Module)?$/i.test(sec) && 
       /^(announceColdkeySwap|announce_coldkey_swap)$/i.test(meth);
 
-    if (!isRename && !isSwap) continue;
+    const isStartCall = settings.dashingEnabled &&
+      /^subtensor(Module)?$/i.test(sec) &&
+      /^(startCall|start_call)$/i.test(meth);
+
+    if (!isRename && !isSwap && !isStartCall) continue;
 
     try {
       const parsed = parseExtrinsic(ext);
@@ -1298,7 +1252,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
       if (isRename) {
         log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的改名交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed);
+        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback');
         seenHashes.set(parsed.txHash, {
           timestamp: now,
           netuid: null,
@@ -1308,7 +1262,17 @@ async function detectEventsInBlock(blockHash, blockNumber) {
         });
       } else if (isSwap) {
         log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的冷键交换声明交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed);
+        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback');
+        seenHashes.set(parsed.txHash, {
+          timestamp: now,
+          netuid: null,
+          tipTao: parsed.tipTao,
+          isRegisterNetwork: false,
+          handled: !!handled
+        });
+      } else if (isStartCall) {
+        log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的 startCall 激活交易 (Hash: ${parsed.txHash})`);
+        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback');
         seenHashes.set(parsed.txHash, {
           timestamp: now,
           netuid: null,
@@ -1597,7 +1561,15 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
   const actualMaxRetries = maxTimeoutRetries !== null ? maxTimeoutRetries : (settings.dashingTimeoutRetries || 0);
   if (attemptNum > actualMaxRetries) return { success: false, error: 'Max timeout retries reached' };
   
-  const successKey = `${label}:${netuid}:${targetHotkey}`;
+  const parts = label.split(':');
+  const baseLabel = parts[0];
+  const suffix = parts[1];
+  let successKey;
+  if (baseLabel === '新子网打新' && suffix) {
+    successKey = `新子网打新:${netuid}:${targetHotkey}:${suffix}`;
+  } else {
+    successKey = `${label}:${netuid}:${targetHotkey}`;
+  }
   if (dashingSuccessByNetuid.get(successKey)) return { success: true };
   
   // Prevent duplicate concurrent timeout retries for the same wallet
@@ -1634,9 +1606,6 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
         if (res.success) {
           log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！Hash: ${res.hash}`);
           dashingSuccessByNetuid.set(successKey, true);
-          if (label === '新子网打新') {
-            pendingNewSubnet = null; // 清除内存兜底，防重复触发
-          }
           sendTelegramAlert(`✅ [${label} 超时重试成功]\n钱包: ${w.name}\n子网: #${netuid}\n重试次数: ${attemptNum}\n交易哈希: ${res.hash}`);
           resolve(res);
         } else {
@@ -1667,6 +1636,8 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
 }
 
 // Staking Sniping execution (pure staking buy-in on newly registered subnet)
+// Note: hotkey parameter is kept for signature compatibility but ignored.
+// The function always resolves the active hotkey globally using resolveHotkey(netuid).
 async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') {
   const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
@@ -1676,7 +1647,9 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   }
 
   // 1. 防重复运行锁（基于 netuid）：如果当前子网的打新循环已在运行，直接拦截
-  if (activeSnipesByNetuid.has(netuid)) {
+  const isDoubleStaking = triggerSource.startsWith('DoubleStaking');
+  const retryLabel = isDoubleStaking ? '新子网打新:DoubleStaking' : '新子网打新:Primary';
+  if (!isDoubleStaking && activeSnipesByNetuid.has(netuid)) {
     log('INFO', `[新子网打新] [触发源: ${triggerSource}] 子网 #${netuid} 打新抢购循环已经在运行中，跳过重复触发。`);
     return;
   }
@@ -1688,7 +1661,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     return;
   }
 
-  const successKey = `新子网打新:${netuid}:${targetHotkey}`;
+  const successKey = `新子网打新:${netuid}:${targetHotkey}:${isDoubleStaking ? 'DoubleStaking' : 'Primary'}`;
   
   // 2. 24小时冷却时间校验（持久化，不受重启影响，不管成功与否）
   const cooldownKey = `new-subnet:${netuid}`;
@@ -1700,7 +1673,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     if (elapsed < 24 * 60 * 60 * 1000) {
       if (Math.abs(currentBlockHeight - cooldown.block) <= 10) {
         shouldWriteCooldown = false; // 同一次事件兜底，不刷新冷却
-      } else {
+      } else if (!isDoubleStaking) {
         log('INFO', `[新子网打新] [触发源: ${triggerSource}] 检测到子网 #${netuid} 在 24 小时冷却时间内 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，且已超过防抖窗口，跳过重复触发。`);
         return;
       }
@@ -1715,7 +1688,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   }
 
   // 3. 内存成功状态校验：若之前已有该子网的成功购买记录，直接拦截退出，防止重复买入
-  if (dashingSuccessByNetuid.get(successKey) === true) {
+  if (!isDoubleStaking && dashingSuccessByNetuid.get(successKey) === true) {
     log('INFO', `[新子网打新] 检测到子网 #${netuid} (Hotkey: ${targetHotkey}) 已经打新成功，跳过执行。`);
     return;
   }
@@ -1734,7 +1707,9 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   }
 
   // 加锁，并初始化/确保成功标记
-  activeSnipesByNetuid.add(netuid);
+  if (!isDoubleStaking) {
+    activeSnipesByNetuid.add(netuid);
+  }
   if (dashingSuccessByNetuid.get(successKey) === undefined) {
     dashingSuccessByNetuid.set(successKey, false);
   }
@@ -1779,13 +1754,12 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
                 log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！Hash: ${res.hash}`);
                 // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
                 dashingSuccessByNetuid.set(successKey, true);
-                pendingNewSubnet = null; // 清除内存兜底，防重复触发
                 sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
                 return res;
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, settings.dashingSlippageLimit, settings.dashingTip, '新子网打新');
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, settings.dashingSlippageLimit, settings.dashingTip, retryLabel);
                 }
                 return res;
               }
@@ -1803,19 +1777,61 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     }
   } finally {
     const unlock = () => {
-      activeSnipesByNetuid.delete(netuid);
+      if (!isDoubleStaking) {
+        activeSnipesByNetuid.delete(netuid);
+      }
     };
 
     if (txPromises.length > 0) {
-      // 1. 正常通过 Promise.allSettled 释放锁
-      Promise.allSettled(txPromises).finally(unlock);
+      Promise.allSettled(txPromises).then((results) => {
+        const anySuccess = dashingSuccessByNetuid.get(successKey);
+        if (!anySuccess) {
+          const errorMsgs = results
+            .map(r => r.status === 'fulfilled' ? r.value?.error : r.reason?.message)
+            .filter(Boolean);
+          const uniqueErrors = [...new Set(errorMsgs)].slice(0, 3).join('; ');
+          
+          const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: ${uniqueErrors || '所有交易提交超时或未成功上链'}`;
+          log('ERROR', msg);
+          sendTelegramAlert(msg).catch(() => {});
+        }
+      }).finally(unlock);
       
       // 2. 超时兜底释放（例如 3分钟）：如果因未知原因 Promise 挂起，强制解锁防止永久死锁
       setTimeout(unlock, 180000); 
     } else {
       // 若一笔交易都未发出（例如 buildStakeTx 抛错），延迟短窗口解锁，防止下个区块到达时瞬间再次重复触发
       setTimeout(unlock, Math.max(3000, interval));
+      
+      const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
+      log('ERROR', msg);
+      sendTelegramAlert(msg).catch(() => {});
     }
+  }
+}
+
+// 二次延时交易执行逻辑 - 传入 source 表明是由交易池还是区块兜底触发的倒计时
+function handleDoubleStaking(netuid, hotkey, source) {
+  const settings = database.getSettings();
+  const delaySec = Number(settings.dashingDoubleStakingDelay || 0);
+  if (delaySec > 0) {
+    if (doubleStakingRegistered.has(netuid)) {
+      log('INFO', `[新子网打新] 子网 #${netuid} 的二次延时买入任务已在运行，忽略重复注册请求。`);
+      return;
+    }
+    doubleStakingRegistered.add(netuid);
+    log('INFO', `[新子网打新] 已登记二次延时买入任务：将在 ${source}-startCall 触发 ${delaySec} 秒后再次执行买入。`);
+    setTimeout(() => {
+      doubleStakingRegistered.delete(netuid); // 定时器触发后从内存中移除，允许后续轮次（如果有）重新注册
+      if (botStatus !== 'Running') {
+        log('INFO', `[新子网打新] [二次延迟买入] 机器人未在运行状态，取消二次延迟交易。`);
+        return;
+      }
+      log('INFO', `[新子网打新] [二次延迟买入] 延时 ${delaySec} 秒已到，开始发起二次打新交易！`);
+      executeStakingSniping(netuid, hotkey, `DoubleStaking-${source}-Delay${delaySec}s`).catch(e => {
+        log('ERROR', `[新子网打新] [二次延迟买入] 执行二次抢购失败: ${e.message}`);
+      });
+    }, delaySec * 1000);
   }
 }
 
@@ -1854,24 +1870,11 @@ async function detectNewSubnetOnChain(blockHeight) {
       // 如果注册区块与当前区块相同，且（缓存中不存在该子网，或缓存的注册区块小于最新注册区块）
       // 这说明：要么是一个全新的 netuid，要么是一个被接管回收(recycled)的 netuid！
       if (regBlock === blockHeight && (!cachedRegBlock || cachedRegBlock < regBlock)) {
-        // 且该子网打新当前未在运行，立即进行链上兜底抢单！
-        if (!activeSnipesByNetuid.has(netuid)) {
-          log('SUCCESS', `[新子网打新] 链上自愈检测到子网 #${netuid} 在区块 #${blockHeight} 刚刚被注册/接管！(缓存区块: ${cachedRegBlock || '无'} -> 当前区块: ${regBlock})。触发 100% 独立自愈兜底抢单！`);
-          
-          // 强行从链上获取最新 hotkey（绕过并强制刷新缓存，因为 recycled 子网的 hotkey 必定变了）
-          const targetHotkey = await resolveHotkey(netuid, true);
-          if (targetHotkey) {
-            // 立即手动更新本地缓存以防同一区块内可能的其他异步检测造成竞态触发
-            subnetRegisteredAtCache.set(netuid, regBlock);
-            subnetHotkeysCache.set(netuid, targetHotkey);
-            
-            executeStakingSniping(netuid, targetHotkey, 'Block-Fallback').catch(e => {
-              log('ERROR', `[新子网打新] 触发链上兜底抢跑失败: ${e.message}`);
-            });
-          } else {
-            log('WARN', `[新子网打新] 无法为子网 #${netuid} 检索到有效 Hotkey，兜底取消。`);
-          }
-        }
+        subnetRegisteredAtCache.set(netuid, regBlock);
+        // 发送 TG 确认提醒
+        const msg = `🔔 [区块确认 - 新子网已上链]\n检测到新子网已在区块 #${blockHeight} 确认注册！新子网为: SN${netuid}\n请保持留意，正在等待 startCall 交易以启动抢跑买入！`;
+        log('SUCCESS', msg);
+        sendTelegramAlert(msg).catch(() => {});
       }
     }
   } catch (e) {
@@ -1949,8 +1952,8 @@ async function poll() {
         }
 
         if (/^subtensor(Module)?$/i.test(parsed.section) && 
-            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit)$/i.test(parsed.callName)) {
-          const handled = await handlePendingExtrinsic(parsed);
+            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit|startCall|start_call)$/i.test(parsed.callName)) {
+          const handled = await handlePendingExtrinsic(parsed, 'Mempool');
           seenHashes.set(parsed.txHash, {
             timestamp: now,
             netuid,
@@ -2216,23 +2219,9 @@ async function connectWs(reason = 'Normal Boot') {
       const settings = database.getSettings();
       if (settings.dashingEnabled) {
         const runDashingFlow = async () => {
-          if (pendingNewSubnet) {
-            const snipe = pendingNewSubnet;
-            pendingNewSubnet = null;
-            if (activeSnipesByNetuid.has(snipe.netuid)) {
-              log('INFO', `[新子网打新] 区块头 #${currentBlockHeight} 到达。内存子网 #${snipe.netuid} 已有抢购循环在运行中，跳过内存兜底触发。`);
-            } else {
-              log('SUCCESS', `[新子网打新] 检测到新区块头 #${currentBlockHeight} 到达，立刻对内存中的新子网 #${snipe.netuid} (Hotkey: ${snipe.hotkey}) 执行 Staking 抢购！`);
-              executeStakingSniping(snipe.netuid, snipe.hotkey, 'Memory-Fallback').catch(e => {
-                log('ERROR', `[新子网打新] 触发内存兜底打新抢购失败: ${e.message}`);
-              });
-            }
+          const hasChange = await detectNewSubnetOnChain(currentBlockHeight);
+          if (hasChange || currentBlockHeight % 100 === 0) {
             await refreshSubnetOwnersCache();
-          } else {
-            const hasChange = await detectNewSubnetOnChain(currentBlockHeight);
-            if (hasChange || currentBlockHeight % 100 === 0) {
-              await refreshSubnetOwnersCache();
-            }
           }
         };
         

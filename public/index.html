@@ -212,7 +212,7 @@
             <div class="strategy-header">
               <div class="strategy-title">
                 <h3>🚀 策略 1: 新建立子网 Staking 抢购 (Staking Sniping)</h3>
-                <p class="card-desc">当监控到他人成功注册新子网时，立刻预测新子 netuid 并提取其交易中的 hotkey，于新区块头到达的第 0 毫秒（不等事件查询）并行发起多笔抢购 addStakeLimit 交易，买入最低价 Alpha 份额。</p>
+                <p class="card-desc">当监控到所有者发送 startCall 激活子网交易的瞬间（或区块自愈补扫时），立即使用全局默认 Hotkey 极速发起多笔 Staking 抢购，并支持配置二次延时买入。</p>
               </div>
               <label class="switch">
                 <input type="checkbox" id="strat-dashing-enabled">
@@ -229,7 +229,7 @@
                 <input type="number" id="strat-dashing-burst" min="1" max="10" placeholder="例如: 1">
               </div>
               <div class="setting-item">
-                <label>最大扫射轮数</label>
+                <label>最大扫射轮数 (从 startCall 瞬间开始扫射)</label>
                 <input type="number" id="strat-dashing-retries" min="1" max="100">
               </div>
               <div class="setting-item">
@@ -245,12 +245,16 @@
                 <input type="number" id="strat-dashing-timeout-retries" min="0" max="100" placeholder="例如: 0">
               </div>
               <div class="setting-item">
-                <label>抢跑小费/优先费 (TAO)</label>
+                <label>startCall 触发抢跑小费/优先费 (TAO)</label>
                 <input type="number" id="strat-dashing-tip" step="0.1" min="0">
               </div>
               <div class="setting-item">
                 <label>允许的最大滑点 (Slippage Limit)</label>
                 <input type="number" id="strat-dashing-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.10">
+              </div>
+              <div class="setting-item">
+                <label>二次延迟买入时间 (秒，0为不进行)</label>
+                <input type="number" id="strat-dashing-double-delay" min="0" placeholder="例如: 10">
               </div>
             </div>
           </div>

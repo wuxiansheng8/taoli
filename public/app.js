@@ -308,6 +308,7 @@ async function loadConfig() {
     document.getElementById('strat-dashing-timeout').value = cfg.dashingTimeoutMs;
     document.getElementById('strat-dashing-timeout-retries').value = cfg.dashingTimeoutRetries !== undefined ? cfg.dashingTimeoutRetries : 0;
     document.getElementById('strat-dashing-tip').value = cfg.dashingTip;
+    document.getElementById('strat-dashing-double-delay').value = cfg.dashingDoubleStakingDelay !== undefined ? cfg.dashingDoubleStakingDelay : '';
     
     document.getElementById('strat-rename-enabled').checked = cfg.renameEnabled;
     document.getElementById('strat-rename-amount').value = cfg.renameAmount !== undefined ? cfg.renameAmount : 100;
@@ -378,6 +379,7 @@ async function saveStrategies() {
     dashingTimeoutMs: Number(document.getElementById('strat-dashing-timeout').value),
     dashingTimeoutRetries: Number(document.getElementById('strat-dashing-timeout-retries').value || 0),
     dashingTip: Number(document.getElementById('strat-dashing-tip').value),
+    dashingDoubleStakingDelay: Number(document.getElementById('strat-dashing-double-delay').value || 0),
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,
     renameAmount: Number(document.getElementById('strat-rename-amount').value || 100),
