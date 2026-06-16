@@ -951,6 +951,21 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
       }
 
       if (netuid && cleanName) {
+        // 🔒 安全保护 0：校验交易发送者是否为该子网的实际所有者（Owner）
+        let expectedOwner = subnetOwnersCache.get(netuid);
+        if (!expectedOwner) {
+          try {
+            const ownerObj = await api.query.subtensorModule.subnetOwner(netuid);
+            expectedOwner = ownerObj?.toString();
+          } catch (err) {
+            log('WARN', `[改名抢跑] 缓存和链上均无法获取子网 #${netuid} 的所有者，跳过所有者校验。`);
+          }
+        }
+        if (expectedOwner && signer && signer !== expectedOwner) {
+          log('WARN', `[改名抢跑] 过滤非所有者发起的非法改名交易：子网 #${netuid} 的实际所有者为 ${expectedOwner}，但提交者为 ${signer}`);
+          return true; // 返回 true 表示交易已处理（忽略）
+        }
+
         // 🔒 安全保护 1：如果新名字是占位符（如 Subnet X、unknown、none 或空值），判定为身份清空或重置，不进行抢跑。
         const defaultPattern = new RegExp(`^Subnet\\s*(${netuid}|x)$`, 'i');
         const isNewPlaceholder = !cleanName ||
