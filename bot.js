@@ -524,7 +524,7 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
     // Check if we use a forced nonce (for RBF speedup) or reserve a new one
     const reservedNonce = (meta && meta.nonce !== undefined) ? meta.nonce : reserveNonce(address);
     
-    const options = {};
+    const options = { era: 0 };
     if (reservedNonce !== null) options.nonce = reservedNonce;
     if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
 
