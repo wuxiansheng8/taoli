@@ -2242,7 +2242,7 @@ async function connectWs(reason = 'Normal Boot') {
       }
     });
 
-    const pollInterval = Math.max(50, settings.dashingIntervalMs || 100);
+    const pollInterval = Math.max(10, settings.mempoolPollIntervalMs || 100);
     
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(poll, pollInterval);

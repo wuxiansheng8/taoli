@@ -293,6 +293,7 @@ async function loadConfig() {
     document.getElementById('cfg-primary-node').value = cfg.primaryNode;
     document.getElementById('cfg-backup-node').value = cfg.backupNode;
     document.getElementById('cfg-rate-limit').value = cfg.rateLimitPerSec;
+    document.getElementById('cfg-mempool-poll-interval').value = cfg.mempoolPollIntervalMs !== undefined ? cfg.mempoolPollIntervalMs : 100;
     document.getElementById('cfg-tg-enabled').checked = cfg.telegramEnabled;
     document.getElementById('cfg-tg-token').value = cfg.telegramToken;
     document.getElementById('cfg-tg-chatid').value = cfg.telegramChatId;
@@ -554,6 +555,7 @@ document.getElementById('settings-form').onsubmit = async (e) => {
     primaryNode: document.getElementById('cfg-primary-node').value,
     backupNode: document.getElementById('cfg-backup-node').value,
     rateLimitPerSec: Number(document.getElementById('cfg-rate-limit').value),
+    mempoolPollIntervalMs: Number(document.getElementById('cfg-mempool-poll-interval').value || 100),
     telegramEnabled: document.getElementById('cfg-tg-enabled').checked,
     telegramToken: document.getElementById('cfg-tg-token').value,
     telegramChatId: document.getElementById('cfg-tg-chatid').value,
