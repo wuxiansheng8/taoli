@@ -849,7 +849,9 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
 
   // 1. registerNetwork / register_network -> 仅仅发送 TG 注册及清算警报，不做 Staking 买入
   if (/^register(_)?network$/i.test(normalizedCall)) {
-    if (!settings.dashingEnabled) return true;
+    const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
+    const dashingActive = settings.dashingEnabled || doubleStakingDelay > 0;
+    if (!dashingActive) return true;
     
     try {
       const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
@@ -889,7 +891,8 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
   }
   // 1b. startCall / start_call -> 策略 1 真正执行 Staking 抢购
   if (/^(start(_)?call)$/i.test(normalizedCall)) {
-    if (!settings.dashingEnabled) return true;
+    const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
+    if (!settings.dashingEnabled && doubleStakingDelay <= 0) return true;
     try {
       const netuid = Number(args.netuid?.toString() || args[0]?.toString());
       if (Number.isFinite(netuid) && netuid > 0) {
@@ -900,10 +903,14 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
         const targetHotkey = await resolveHotkey(netuid);
         if (targetHotkey) {
           const triggerSrc = `${fallbackSource}-startCall`;
-          log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
-          executeStakingSniping(netuid, targetHotkey, triggerSrc).catch(e => {
-            log('ERROR', `[新子网打新] 触发 startCall 抢购失败: ${e.message}`);
-          });
+          if (settings.dashingEnabled) {
+            log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
+            executeStakingSniping(netuid, targetHotkey, triggerSrc).catch(e => {
+              log('ERROR', `[新子网打新] 触发 startCall 抢购失败: ${e.message}`);
+            });
+          } else {
+            log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})。策略 1 主开关已关闭，跳过主线买入。`);
+          }
           
           // 执行二次延迟交易逻辑 - 倒计时起点为检测到 startCall 的这一瞬间
           handleDoubleStaking(netuid, targetHotkey, fallbackSource);
@@ -1150,7 +1157,9 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
 // Block-Fallback scanner for missed mempool transactions (Strategy 2 & 3)
 async function detectEventsInBlock(blockHash, blockNumber) {
   const settings = database.getSettings();
-  if (!settings.renameEnabled && !settings.swapEnabled && !settings.dashingEnabled) return;
+  const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
+  const dashingActive = settings.dashingEnabled || doubleStakingDelay > 0;
+  if (!settings.renameEnabled && !settings.swapEnabled && !dashingActive) return;
 
   // 兜底防空保护：确保 Owner 缓存已经同步就绪
   if (settings.swapEnabled && subnetOwnersCache.size === 0) {
@@ -1236,7 +1245,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       /^subtensor(Module)?$/i.test(sec) && 
       /^(announceColdkeySwap|announce_coldkey_swap)$/i.test(meth);
 
-    const isStartCall = settings.dashingEnabled &&
+    const isStartCall = dashingActive &&
       /^subtensor(Module)?$/i.test(sec) &&
       /^(startCall|start_call)$/i.test(meth);
 
@@ -2217,7 +2226,9 @@ async function connectWs(reason = 'Normal Boot') {
       });
       
       const settings = database.getSettings();
-      if (settings.dashingEnabled) {
+      const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
+      const dashingActive = settings.dashingEnabled || doubleStakingDelay > 0;
+      if (dashingActive) {
         const runDashingFlow = async () => {
           const hasChange = await detectNewSubnetOnChain(currentBlockHeight);
           if (hasChange || currentBlockHeight % 100 === 0) {
