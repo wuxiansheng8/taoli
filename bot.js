@@ -290,6 +290,14 @@ async function refreshSubnetOwnersCache() {
   }
 }
 
+function isSubnetOwnerAddress(address) {
+  if (!address) return false;
+  for (const owner of subnetOwnersCache.values()) {
+    if (owner === address) return true;
+  }
+  return false;
+}
+
 // Helper to log with Beijing Time (UTC+8)
 function log(level, message) {
   const tzOffset = 8 * 60; // Beijing is UTC+8
@@ -993,6 +1001,14 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
     try {
       const oldColdkey = signer;
       if (oldColdkey && oldColdkey !== 'unsigned' && oldColdkey !== 'unknown') {
+        if (!isSubnetOwnerAddress(oldColdkey)) {
+          if (subnetOwnersCache.size === 0) {
+            log('WARN', `[冷键交换抢跑] 活跃子网 Owner 缓存为空，无法判断是否需要抢跑，跳过本次处理并等待重试...`);
+            return false;
+          }
+          return true;
+        }
+
         log('INFO', `[冷键交换抢跑] 扫到交换冷键声明 -> ${callName} (Old Coldkey: ${oldColdkey})`);
 
         let matched = false;
@@ -1200,11 +1216,14 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
       // 3. ColdkeySwapAnnounced (冷键交换声明成功)
       if (section === 'subtensorModule' && method === 'ColdkeySwapAnnounced') {
-        const coldkey = data[0];
-        const swapColdkey = data[1];
-        const logMsg = `[冷键交换] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkey}！`;
-        log('SUCCESS', logMsg);
-        sendTelegramAlert(`🎉 ${logMsg}`).catch(() => {});
+        const coldkey = data.who || data[0];
+        const swapColdkeyHash = data.newColdkeyHash || data[1];
+
+        if (isSubnetOwnerAddress(coldkey)) {
+          const logMsg = `[冷键交换] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkeyHash}！`;
+          log('SUCCESS', logMsg);
+          sendTelegramAlert(`🎉 ${logMsg}`).catch(() => {});
+        }
       }
 
       // 4. StakeAdded (质押成功 - 检查是否是我们的钱包)
@@ -1270,15 +1289,26 @@ async function detectEventsInBlock(blockHash, blockNumber) {
           handled: !!handled
         });
       } else if (isSwap) {
-        log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的冷键交换声明交易 (Hash: ${parsed.txHash})`);
-        const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback');
-        seenHashes.set(parsed.txHash, {
-          timestamp: now,
-          netuid: null,
-          tipTao: parsed.tipTao,
-          isRegisterNetwork: false,
-          handled: !!handled
-        });
+        const oldColdkey = parsed.signer;
+        if (isSubnetOwnerAddress(oldColdkey)) {
+          log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的冷键交换声明交易 (Hash: ${parsed.txHash})`);
+          const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback');
+          seenHashes.set(parsed.txHash, {
+            timestamp: now,
+            netuid: null,
+            tipTao: parsed.tipTao,
+            isRegisterNetwork: false,
+            handled: !!handled
+          });
+        } else {
+          seenHashes.set(parsed.txHash, {
+            timestamp: now,
+            netuid: null,
+            tipTao: parsed.tipTao,
+            isRegisterNetwork: false,
+            handled: true
+          });
+        }
       } else if (isStartCall) {
         log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的 startCall 激活交易 (Hash: ${parsed.txHash})`);
         const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback');
