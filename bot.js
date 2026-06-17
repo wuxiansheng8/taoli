@@ -437,6 +437,15 @@ function log(level, message) {
   }
 }
 
+// HTML escaping helper for Telegram alerts
+function escapeHtml(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // Send Telegram alerts
 async function sendTelegramAlert(text) {
   const settings = database.getSettings();
@@ -1159,7 +1168,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool') {
 
         const isPruning = numSubnets >= 128;
         const oldName = isPruning ? (subnetNamesCache.get(targetNetuid) || '未知') : '';
-        const statusStr = isPruning ? `清算替换 (原名: ${oldName})` : '空闲槽位注册';
+        const statusStr = isPruning ? `清算替换 (原名: ${escapeHtml(oldName)})` : '空闲槽位注册';
         const tgMsg = `🚨 <b>[新子网注册 - 扫入交易池]</b>\n` +
                       `━━━━━━━━━━━━━━━━━━\n` +
                       `• <b>目标槽位</b>: <code>SN#${targetNetuid}</code>\n` +
@@ -1588,7 +1597,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
           sendTelegramAlert(
             `🔔 <b>[${strategyLabel} 链上最终确认]</b>\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
-            `• <b>我方钱包</b>: <code>${w.name}</code>\n` +
+            `• <b>我方钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
             `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
             `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
             `• <b>最终质押</b>: <code>${amountTao} TAO</code>\n` +
@@ -1798,7 +1807,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
       `━━━━━━━━━━━━━━━━━━\n` +
       `• <b>触发来源</b>: <code>Mempool-扫描</code>\n` +
       `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
-      `• <b>拟改名称</b>: <code>${cleanName}</code>\n` +
+      `• <b>拟改名称</b>: <code>${escapeHtml(cleanName)}</code>\n` +
       `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
       `• <b>单轮并发</b>: <code>${burstCount} 笔/钱包</code>\n` +
       `• <b>加密状态</b>: <code>${encryptEnabled ? 'MEV Shield 加密' : '明文发送'}</code>\n` +
@@ -1863,7 +1872,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
                 sendTelegramAlert(
                   `✅ <b>[${label} 成功]</b>\n` +
                   `━━━━━━━━━━━━━━━━━━\n` +
-                  `• <b>使用钱包</b>: <code>${w.name}</code>\n` +
+                  `• <b>使用钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
                   `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
                   blockStr +
                   idxStr +
@@ -1953,7 +1962,7 @@ async function executeSandwichBuy(netuid, hotkey, amountTao, tip, slippageLimit)
         `━━━━━━━━━━━━━━━━━━\n` +
         `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
         `• <b>阶段</b>: <code>前置买入 (Frontrun Buy)</code>\n` +
-        `• <b>失败原因</b>: <code>${res.error}</code>\n` +
+        `• <b>失败原因</b>: <code>${escapeHtml(res.error)}</code>\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
         `<i>⚠️ 套利终止。</i>`
       );
@@ -2018,7 +2027,7 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
       sendTelegramAlert(
         `🎉 <b>[三明治套利 成功完成]</b>\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
-        `• <b>操作钱包</b>: <code>${w.name}</code>\n` +
+        `• <b>操作钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
         `• <b>套利子网</b>: <code>SN#${netuid}</code>\n` +
         blockStr +
         idxStr +
@@ -2034,10 +2043,10 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
       sendTelegramAlert(
         `❌ <b>[三明治套利 严重异常]</b>\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
-        `• <b>使用钱包</b>: <code>${w.name}</code>\n` +
+        `• <b>使用钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
         blockStr +
         idxStr +
-        `• <b>失败原因</b>: <code>${res.error}</code>\n` +
+        `• <b>失败原因</b>: <code>${escapeHtml(res.error)}</code>\n` +
         `━━━━━━━━━━━━━━━━━━\n` +
         `<i>⚠️ 警告：前置买入已成交，但后置卖出失败！请立即手动在钱包中抛售 Alpha 份额！</i>`
       );
@@ -2122,7 +2131,7 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
             sendTelegramAlert(
               `✅ <b>[${label} 超时重试成功]</b>\n` +
               `━━━━━━━━━━━━━━━━━━\n` +
-              `• <b>使用钱包</b>: <code>${w.name}</code>\n` +
+              `• <b>使用钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
               `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
               `• <b>重试次数</b>: <code>${attemptNum}</code>\n` +
               blockStr +
@@ -2285,7 +2294,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
                 const hashAlert = res.isEncrypted
                   ? `加密外层哈希 (Outer): ${res.outerHash}\n内层真实哈希 (Inner): ${res.innerHash}`
                   : `交易哈希: ${res.hash}`;
-                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${w.name}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n${hashAlert}`);
+                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${escapeHtml(w.name)}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n${hashAlert}`);
                 return res;
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
@@ -2322,7 +2331,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
             .filter(Boolean);
           const uniqueErrors = [...new Set(errorMsgs)].slice(0, 3).join('; ');
           
-          const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: ${uniqueErrors || '所有交易提交超时或未成功上链'}`;
+          const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: ${escapeHtml(uniqueErrors || '所有交易提交超时或未成功上链')}`;
           log('ERROR', msg);
           sendTelegramAlert(msg).catch(() => {});
         }
