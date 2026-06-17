@@ -15,6 +15,7 @@ let botStatus = 'Stopped'; // 'Stopped', 'Starting', 'Running', 'Error'
 let currentActiveNode = '';
 let currentLatency = -1;
 let currentBlockHeight = 0;
+let cachedBlockHash = null; // 缓存当前区块 hash,供 MEV Shield mortal era 签名用
 let systemUptimeStart = null;
 let pollTimer = null;
 let latencyTimer = null;
@@ -640,9 +641,26 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
       return resolve({ success: false, error: 'Local nonce not ready' });
     }
 
-    const options = { era: 0 };
+    // 准备签名选项
+    const options = {};
     options.nonce = reservedNonce;
     if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
+
+    // 关键修复:shield 外层(submit_encrypted)必须用 mortal era ≤8
+    // 官方 shield pallet 的 CheckMortality 会拒绝 immortal(era:0)或 >8 的 submit_encrypted
+    // 这是 1010 BadSignature 的根因(交易进不了池就被拒)
+    if (tx.method.section === 'mevShield' && tx.method.method === 'submitEncrypted') {
+      if (cachedBlockHash && currentBlockHeight > 0) {
+        options.blockHash = cachedBlockHash;
+        options.era = { period: 8, current: currentBlockHeight };
+      } else {
+        // 兜底:缓存未就绪,不设 era(让 api 用默认 mortal,可能 >8 被拒)
+        log('WARN', '[MEV Shield] blockHash 缓存未就绪,使用默认 era(可能被拒)');
+      }
+    } else {
+      // 普通明文交易保持原行为(immortal)
+      options.era = 0;
+    }
 
     const finish = (result) => {
       if (settled) return;
@@ -761,8 +779,15 @@ async function sendMevShieldTx(innerTx, pair, txTimeoutMs = 15000, tip = 0, meta
   const pqStartTime = Date.now();
 
   try {
-    // 签名内层交易 (Immortal 签名)
-    const innerOptions = { nonce: innerNonce, era: 0 };
+    // 签名内层交易 - inner 是真实 dispatch 的交易,用 mortal era 加固签名
+    // 官方:inner extrinsic 在 on_initialize 时 dispatch,会用当前区块校验签名
+    const innerOptions = { nonce: innerNonce };
+    if (cachedBlockHash && currentBlockHeight > 0) {
+      innerOptions.blockHash = cachedBlockHash;
+      innerOptions.era = { period: 64, current: currentBlockHeight }; // inner 允许长一点
+    } else {
+      innerOptions.era = 0; // 兜底:缓存未就绪
+    }
     await innerTx.signAsync(pair, innerOptions);
     
     // 【从这里明确导出内层交易签名哈希】
@@ -2691,6 +2716,7 @@ async function connectWs(reason = 'Normal Boot') {
       if (generation !== connectGeneration || botStatus === 'Stopped') return;
       const blockNumber = header.number.toNumber();
       currentBlockHeight = blockNumber;
+      cachedBlockHash = header.hash; // 更新区块 hash 缓存
       updateMevShieldKeys().catch(() => {});
       if (global.blockCallback) {
         global.blockCallback(blockNumber);
