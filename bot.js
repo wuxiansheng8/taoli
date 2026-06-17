@@ -25,6 +25,7 @@ let connectGeneration = 0;
 let wallets = [];
 let keyring = null;
 let lastMempoolErrorTime = 0; // added for throttled error logging
+let lastTtlCleanupTime = 0; // 新增：用于限制 TTL 内存清理频率
 
 // Mempool maps for deduplication and nonce tracking
 const seenHashes = new Map();
@@ -2420,15 +2421,20 @@ async function poll() {
     
     const now = Date.now();
     
-    // Seen hashes TTL cleanup (5 minutes window)
-    for (const [hash, entry] of seenHashes.entries()) {
-      const timestamp = (entry && typeof entry === 'object') ? entry.timestamp : entry;
-      if (now - timestamp > 5 * 60 * 1000) seenHashes.delete(hash);
-    }
-    
-    // Seen actions TTL cleanup (10 minutes window)
-    for (const [action, timestamp] of seenActions.entries()) {
-      if (now - timestamp > 10 * 60 * 1000) seenActions.delete(action);
+    // 限制每 10 秒清理一次过期的 seenHashes 和 seenActions 缓存，避免每次轮询重复遍历 Map
+    if (now - lastTtlCleanupTime > 10000) {
+      lastTtlCleanupTime = now;
+      
+      // 5分钟过期的哈希清理
+      for (const [hash, entry] of seenHashes.entries()) {
+        const timestamp = (entry && typeof entry === 'object') ? entry.timestamp : entry;
+        if (now - timestamp > 5 * 60 * 1000) seenHashes.delete(hash);
+      }
+      
+      // 10分钟过期的动作清理
+      for (const [action, timestamp] of seenActions.entries()) {
+        if (now - timestamp > 10 * 60 * 1000) seenActions.delete(action);
+      }
     }
 
     for (const hex of pendingHexs) {
@@ -2525,7 +2531,7 @@ function disconnectForReconnect(reason) {
   log('WARN', `因 ${reason} 断开连接，准备自动重连...`);
   
   if (pollTimer) {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = null;
   }
   if (latencyTimer) {
@@ -2721,10 +2727,20 @@ async function connectWs(reason = 'Normal Boot') {
       }
     });
 
-    const pollInterval = Math.max(10, settings.mempoolPollIntervalMs || 100);
+    // 只抬下限为 50ms，不设上限，允许用户手动降压放慢扫描速度
+    const pollInterval = Math.max(50, settings.mempoolPollIntervalMs || 100);
     
-    if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(poll, pollInterval);
+    if (pollTimer) clearTimeout(pollTimer);
+    
+    // 改为自适应递归轮询，并引入代次校验锁，防止重连后旧的轮询链复活（双轮询洞）
+    const runPoll = async () => {
+      if (generation !== connectGeneration || botStatus !== 'Running') return;
+      await poll();
+      // 在 await 异步返回后再次校验，防止在 poll 挂起期间发生重连导致老链复活
+      if (generation !== connectGeneration || botStatus !== 'Running') return;
+      pollTimer = setTimeout(runPoll, pollInterval);
+    };
+    runPoll(); // 立即执行第一轮，不浪费首轮时机
 
     if (latencyTimer) clearInterval(latencyTimer);
     latencyTimer = setInterval(async () => {
@@ -2782,7 +2798,7 @@ function stopBot() {
   }
   
   if (pollTimer) {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = null;
   }
   if (latencyTimer) {
