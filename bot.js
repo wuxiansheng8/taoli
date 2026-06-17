@@ -2713,6 +2713,17 @@ async function connectWs(reason = 'Normal Boot') {
     broadcastLatencyTimer = setInterval(testBroadcastNodes, 10000);
     setTimeout(testBroadcastNodes, 2000);
 
+    // 主动同步请求最新区块头，强行填满区块缓存高度和 Hash，消除 12 秒的启动真空期
+    log('INFO', '[API初始化] 正在主动拉取最新区块头以初始化区块高度与 Hash 缓存...');
+    try {
+      const initHeader = await api.rpc.chain.getHeader();
+      currentBlockHeight = initHeader.number.toNumber();
+      cachedBlockHash = initHeader.hash;
+      log('SUCCESS', `[API初始化] 区块缓存初始化成功：最新区块高度 #${currentBlockHeight} | Hash: ${cachedBlockHash.toHex().slice(0, 15)}...`);
+    } catch (err) {
+      log('WARN', `[API初始化] 预拉取最新区块头失败（将依赖随后的区块订阅自愈）: ${err.message}`);
+    }
+
     log('SUCCESS', '[API初始化] 节点连接与全部初始化请求执行完毕！机器人正式进入 RUNNING 状态，已启动区块头 (subscribeNewHeads) 监听！');
 
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
