@@ -655,19 +655,14 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
     options.nonce = reservedNonce;
     if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
 
-    // 关键修复:shield 外层(submit_encrypted)必须用 mortal era ≤8
-    // 官方 shield pallet 的 CheckMortality 会拒绝 immortal(era:0)或 >8 的 submit_encrypted
-    // 这是 1010 BadSignature 的根因(交易进不了池就被拒)
-    if (tx.method.section === 'mevShield' && tx.method.method === 'submitEncrypted') {
-      if (cachedBlockHash && currentBlockHeight > 0) {
-        options.blockHash = cachedBlockHash;
-        options.era = { period: 8, current: currentBlockHeight };
-      } else {
-        // 兜底:缓存未就绪,不设 era(让 api 用默认 mortal,可能 >8 被拒)
-        log('WARN', '[MEV Shield] blockHash 缓存未就绪,使用默认 era(可能被拒)');
-      }
+    // 统一设置所有交易（明文和加密）为 Mortal Era (生命周期为 8 个区块，约 96 秒)
+    // 1. 解决 MEV Shield 外层加密交易必须 <=8 区块的要求，规避 1010 错误
+    // 2. 保护明文打新交易：若 20-30 秒内未能挤进前几个区块打包，则交易自动作废，防止后期滞后打包导致高价套牢
+    if (cachedBlockHash && currentBlockHeight > 0) {
+      options.blockHash = cachedBlockHash;
+      options.era = { period: 8, current: currentBlockHeight };
     } else {
-      // 普通明文交易保持原行为(immortal)
+      // 兜底：缓存未就绪时回退为 0 (Immortal)
       options.era = 0;
     }
 
