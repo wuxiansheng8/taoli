@@ -695,12 +695,14 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
                 }
               } catch (err) {}
               
-              finish({ 
-                success: true, 
+              finish({
+                success: true,
                 hash: tx.hash.toHex(),
                 blockHash: blockHash.toHex(),
                 blockNumber: blockNumber,
-                txIndex: txIndex >= 0 ? txIndex + 1 : null,
+                // 假设区块 index 0 是 inherent(timestamp),不计入用户交易
+                // 直接用绝对 index,它等于"去掉 inherent 后的用户交易序号"(从1开始)
+                txIndex: txIndex >= 1 ? txIndex : null,
                 events: events || []
               });
             });
@@ -1490,7 +1492,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
           `━━━━━━━━━━━━━━━━━━\n` +
           `• <b>注册子网</b>: <code>SN#${netuid}</code>\n` +
           `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-          `• <b>排队位置</b>: <code>第 ${extrinsicIndex + 1} 笔交易</code>\n` +
+          `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
           `━━━━━━━━━━━━━━━━━━\n` +
           `<i>🎉 子网已被链正式确认添加！</i>`
         ).catch(() => {});
@@ -1506,7 +1508,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
           `━━━━━━━━━━━━━━━━━━\n` +
           `• <b>改名子网</b>: <code>SN#${netuid}</code>\n` +
           `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-          `• <b>排队位置</b>: <code>第 ${extrinsicIndex + 1} 笔交易</code>\n` +
+          `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
           `━━━━━━━━━━━━━━━━━━\n` +
           `<i>🎉 目标子网改名已由链正式确认！</i>`
         ).catch(() => {});
@@ -1525,7 +1527,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
             `━━━━━━━━━━━━━━━━━━\n` +
             `• <b>声明钱包</b>: <code>${coldkey}</code>\n` +
             `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-            `• <b>排队位置</b>: <code>第 ${extrinsicIndex + 1} 笔交易</code>\n` +
+            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
             `━━━━━━━━━━━━━━━━━━\n` +
             `<i>🎉 冷键交换声明已由链正式确认！</i>`
           ).catch(() => {});
@@ -1542,7 +1544,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
         const w = wallets.find(x => x.pair && x.pair.address === coldkey);
         if (w) {
           const amountTao = (Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2);
-          log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex + 1} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
+          log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
           
           let strategyLabel = '新子网打新';
           const nowTime = Date.now();
@@ -1563,7 +1565,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
             `━━━━━━━━━━━━━━━━━━\n` +
             `• <b>我方钱包</b>: <code>${w.name}</code>\n` +
             `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-            `• <b>排队位置</b>: <code>第 ${extrinsicIndex + 1} 笔交易</code>\n` +
+            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
             `• <b>最终质押</b>: <code>${amountTao} TAO</code>\n` +
             `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
             `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
