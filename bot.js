@@ -266,36 +266,20 @@ async function calculateDynamicSlippage(netuid, victimAmountTao) {
       return settings.sandwichSlippageLimit || 0.05;
     }
 
-    const priceBig = await getSubnetPrice(netuid);
-    if (!priceBig) return settings.sandwichSlippageLimit || 0.05;
-    const P0 = Number(priceBig); // Price in RAO TAO per RAO Alpha
+    // 直接从链上精确存储 subnetTAO 获取储备金 (RAO)，转换为 TAO
+    const subnetTao = await api.query.subtensorModule.subnetTAO(netuid);
+    if (!subnetTao) return settings.sandwichSlippageLimit || 0.05;
+    const T = Number(subnetTao.toString()) / 1e9;
+    if (T <= 0) return settings.sandwichSlippageLimit || 0.05;
 
-    const t = 10 * 1e9; // Simulate swapping 10 TAO
-    let aVal;
-    if (api.rpc.swap && api.rpc.swap.simSwapTaoForAlpha) {
-      aVal = await api.rpc.swap.simSwapTaoForAlpha(netuid, t);
-    } else {
-      return settings.sandwichSlippageLimit || 0.05;
-    }
-    
-    const a = Number(aVal.toString());
-    if (a <= 0) return settings.sandwichSlippageLimit || 0.05;
-
-    const P_rao = P0 / 1e9;
-    const denominator = t - a * P_rao;
-    if (denominator <= 0) return settings.sandwichSlippageLimit || 0.05;
-    
-    const A = (a * t) / denominator;
-    const T = P_rao * A;
-    
-    const V = victimAmountTao * 1e9;
-    const priceRatio = Math.pow(1.0 + V / T, 2);
+    // 使用在同一个单位 (TAO) 下的 V 和 T 进行计算
+    const priceRatio = Math.pow(1.0 + victimAmountTao / T, 2);
     const expectedRise = priceRatio - 1.0;
     
     const safetyFactor = settings.dynamicSlippageSafetyFactor || 0.7;
     const dynamicSlippage = expectedRise * safetyFactor;
     
-    log('INFO', `[动态滑点] 子网 #${netuid} 推算储备金: ${(T / 1e9).toFixed(2)} TAO, 受害者交易: ${victimAmountTao} TAO, 预测价格涨幅: ${(expectedRise * 100).toFixed(2)}%, 设定动态滑点: ${(dynamicSlippage * 100).toFixed(2)}%`);
+    log('INFO', `[动态滑点] 子网 #${netuid} 链上精确储备金: ${T.toFixed(4)} TAO, 受害者交易: ${victimAmountTao} TAO, 预测价格涨幅: ${(expectedRise * 100).toFixed(2)}%, 设定动态滑点: ${(dynamicSlippage * 100).toFixed(2)}%`);
     
     return Math.max(0.01, Math.min(0.50, dynamicSlippage));
   } catch (err) {
@@ -1064,6 +1048,10 @@ async function getNextPruneCandidate(currentBlock) {
 // Fetch current Alpha price in RAO from runtime APIs
 async function getSubnetPrice(netuid) {
   try {
+    if (api.rpc.swap && api.rpc.swap.currentAlphaPrice) {
+      const price = await api.rpc.swap.currentAlphaPrice(netuid);
+      if (price) return BigInt(price.toString());
+    }
     if (api.call.subnetInfoRuntimeApi && api.call.subnetInfoRuntimeApi.getSubnetInfoV2) {
       const info = await api.call.subnetInfoRuntimeApi.getSubnetInfoV2(netuid);
       if (info && info.isSome) {
@@ -1087,16 +1075,26 @@ async function getSubnetPrice(netuid) {
 // Build addStake or addStakeLimit based on metadata compatibility
 async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit) {
   const hasLimitCall = typeof api.tx.subtensorModule.addStakeLimit === 'function';
-  if (hasLimitCall && slippageLimit !== undefined) {
-    const currentPrice = await getSubnetPrice(netuid);
-    if (currentPrice !== null) {
-      const settings = database.getSettings();
-      const slippageMultiplier = 1.0 + parseFloat(slippageLimit);
-      const limitPrice = BigInt(Math.floor(Number(currentPrice) * slippageMultiplier));
-      const allowPartial = settings.allowPartialStaking !== false;
-      
-      log('INFO', `[限价保护] 启用 addStakeLimit -> 当前价格: ${(Number(currentPrice) / 1e9).toFixed(4)} TAO/Alpha, 设定限价: ${(Number(limitPrice) / 1e9).toFixed(4)} TAO/Alpha, 允许部分成交: ${allowPartial}`);
-      return api.tx.subtensorModule.addStakeLimit(hotkey, netuid, amountBigInt, limitPrice, allowPartial);
+  if (slippageLimit !== undefined) {
+    if (hasLimitCall) {
+      const currentPrice = await getSubnetPrice(netuid);
+      if (currentPrice !== null) {
+        const settings = database.getSettings();
+        const slippageMultiplier = 1.0 + parseFloat(slippageLimit);
+        const limitPrice = BigInt(Math.floor(Number(currentPrice) * slippageMultiplier));
+        const allowPartial = settings.allowPartialStaking !== false;
+        
+        // 成功获取价格时保持静默
+        return api.tx.subtensorModule.addStakeLimit(hotkey, netuid, amountBigInt, limitPrice, allowPartial);
+      } else {
+        // 未能获取价格时触发降级中文报警
+        log('WARN', `[警告] 未能获取到子网 #${netuid} 的当前价格，限价保护失效！已降级为市价质押（存在被夹风险）`);
+        sendTelegramAlert(`⚠️ <b>[限价降级警告]</b>\n未能获取到子网 #${netuid} 的当前价格，限价保护失效！\n已降级为市价质押（存在被夹风险）。`).catch(() => {});
+      }
+    } else {
+      // 节点不支持限价调用
+      log('WARN', `[警告] 链上节点不支持限价质押方法，已降级为市价质押`);
+      sendTelegramAlert(`⚠️ <b>[限价降级警告]</b>\n链上节点不支持限价质押方法，已降级为市价质押。`).catch(() => {});
     }
   }
   return api.tx.subtensorModule.addStake(hotkey, netuid, amountBigInt);
@@ -2646,7 +2644,20 @@ async function connectWs(reason = 'Normal Boot') {
         return;
       }
       
-      api = await ApiPromise.create({ provider });
+      api = await ApiPromise.create({
+        provider,
+        rpc: {
+          swap: {
+            currentAlphaPrice: {
+              description: 'Get current alpha price',
+              params: [
+                { name: 'netuid', type: 'u16' }
+              ],
+              type: 'u64'
+            }
+          }
+        }
+      });
       if (generation !== connectGeneration || botStatus === 'Stopped') {
         if (api) {
           try { await api.disconnect(); } catch (err) {}
