@@ -1,9 +1,7 @@
 const { ApiPromise, WsProvider, Keyring } = require('@polkadot/api');
-const { cryptoWaitReady, xxhashAsU8a } = require('@polkadot/util-crypto');
+const { cryptoWaitReady } = require('@polkadot/util-crypto');
 const axios = require('axios');
 const WebSocket = require('ws');
-const crypto = require('crypto');
-const { randomBytes } = crypto;
 const database = require('./database');
 
 // Logs buffer and state
@@ -15,7 +13,7 @@ let botStatus = 'Stopped'; // 'Stopped', 'Starting', 'Running', 'Error'
 let currentActiveNode = '';
 let currentLatency = -1;
 let currentBlockHeight = 0;
-let cachedBlockHash = null; // 缓存当前区块 hash,供 MEV Shield mortal era 签名用
+let cachedBlockHash = null; // 缓存当前区块 hash,供 mortal era 签名用
 let systemUptimeStart = null;
 let pollTimer = null;
 let latencyTimer = null;
@@ -36,111 +34,6 @@ const balanceByAddress = new Map();
 const processedNetuids = new Map();
 const dashingSuccessByNetuid = new Map(); // added for tracking successful snipes
 const activeSnipesByNetuid = new Set(); // added to prevent concurrent duplicate sniping loops
-
-// MEV Shield background keys cache
-let cachedNextKeyBytes = null;
-let cachedNextKeyExpiresAt = 0;
-let hasMevShieldPallet = false;
-
-// Preloaded noble modules
-let ml_kem768 = null;
-let xchacha20poly1305 = null;
-
-async function initNoblePQ() {
-  try {
-    const PQ = await import('@noble/post-quantum/ml-kem.js');
-    ml_kem768 = PQ.ml_kem768;
-    const CH = await import('@noble/ciphers/chacha.js');
-    xchacha20poly1305 = CH.xchacha20poly1305;
-    log('INFO', '成功预加载 @noble/post-quantum 与 @noble/ciphers 模块');
-  } catch (err) {
-    log('ERROR', `预加载 noble post-quantum/ciphers 模块失败: ${err.message}`);
-  }
-}
-
-async function updateMevShieldKeys() {
-  if (!api || !api.isConnected) return;
-  try {
-    hasMevShieldPallet = !!api.query.mevShield;
-    if (!hasMevShieldPallet) return;
-
-    if (api.query.mevShield.nextKey) {
-      const keyObj = await api.query.mevShield.nextKey();
-      if (keyObj.isSome) {
-        cachedNextKeyBytes = keyObj.unwrap();
-        
-        if (api.query.mevShield.nextKeyExpiresAt) {
-          const expiresObj = await api.query.mevShield.nextKeyExpiresAt();
-          cachedNextKeyExpiresAt = Number(expiresObj.toString());
-        } else {
-          cachedNextKeyExpiresAt = currentBlockHeight + 100; // 兜底生存期
-        }
-      } else {
-        cachedNextKeyBytes = null;
-        cachedNextKeyExpiresAt = 0;
-      }
-    }
-  } catch (e) {
-    console.warn('Failed to update MEV Shield keys:', e.message);
-  }
-}
-
-async function getMevShieldSuccess(blockHash, targetId) {
-  try {
-    const apiAt = await api.at(blockHash);
-    const events = await apiAt.query.system.events();
-    
-    let ourQueueIndex = -1;
-    let submitCount = 0;
-    
-    // A. 遍历全局事件，寻找所有 EncryptedSubmitted 以确定我们在区块解密队列中的索引
-    for (const { phase, event } of events) {
-      if (phase.isApplyExtrinsic && event.section === 'mevShield' && event.method === 'EncryptedSubmitted') {
-        const idVal = event.data.id || event.data[0];
-        if (idVal && idVal.toString() === targetId) {
-          ourQueueIndex = submitCount;
-          break;
-        }
-        submitCount++;
-      }
-    }
-    
-    if (ourQueueIndex === -1) {
-      return { success: false, error: 'MevShield queue index tracking failed: EncryptedSubmitted not found' };
-    }
-    
-    // B. 定位 Finalization 阶段中与该队列索引相匹配的内层执行结果事件
-    for (const { phase, event } of events) {
-      if (phase.toString() === 'Finalization' && event.section === 'mevShield') {
-        const indexVal = event.data.index || event.data[0];
-        if (indexVal && Number(indexVal.toString()) === ourQueueIndex) {
-          if (event.method === 'ExtrinsicDispatched') {
-            return { success: true };
-          } else if (event.method === 'ExtrinsicDispatchFailed') {
-            let errorMsg = 'Inner transaction dispatch failed';
-            const errorVal = event.data.error || event.data[1];
-            if (errorVal) {
-              if (errorVal.isModule) {
-                const decoded = api.registry.findMetaError(errorVal.asModule);
-                errorMsg = `${decoded.section}.${decoded.name}: ${decoded.docs.join(' ')}`;
-              } else {
-                errorMsg = errorVal.toString();
-              }
-            }
-            return { success: false, error: errorMsg };
-          } else if (event.method === 'ExtrinsicDecodeFailed') {
-            return { success: false, error: 'Inner transaction decoding failed (bad ciphertext)' };
-          } else if (event.method === 'ExtrinsicExpired') {
-            return { success: false, error: 'Inner transaction expired' };
-          }
-        }
-      }
-    }
-  } catch (err) {
-    return { success: false, error: `Failed to inspect events: ${err.message}` };
-  }
-  return { success: false, error: 'Inner transaction status unresolved in Finalization' };
-}
 
 // Subnet Owner, Hotkey & Registration Block Cache (to bypass RPC network queries during critical frontrunning path)
 const subnetOwnersCache = new Map();
@@ -607,17 +500,12 @@ function getWalletsStatus() {
   });
 }
 
-// Local Nonce management supporting single and double reservation
-function reserveNonce(address, isDouble = false) {
+// Local Nonce management
+function reserveNonce(address) {
   const nextNonce = nextNonceByAddress.get(address);
   if (nextNonce === undefined || isNaN(nextNonce)) return null;
-  if (isDouble) {
-    nextNonceByAddress.set(address, nextNonce + 2);
-    return { outer: nextNonce, inner: nextNonce + 1 };
-  } else {
-    nextNonceByAddress.set(address, nextNonce + 1);
-    return nextNonce;
-  }
+  nextNonceByAddress.set(address, nextNonce + 1);
+  return nextNonce;
 }
 
 // 低层：轻量级 Extrinsic 签名与广播（纯事务发送器）
@@ -639,9 +527,8 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
     options.nonce = reservedNonce;
     if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
 
-    // 统一设置所有交易（明文和加密）为 Mortal Era (生命周期为 8 个区块，约 96 秒)
-    // 1. 解决 MEV Shield 外层加密交易必须 <=8 区块的要求，规避 1010 错误
-    // 2. 保护明文打新交易：若 20-30 秒内未能挤进前几个区块打包，则交易自动作废，防止后期滞后打包导致高价套牢
+    // 统一设置明文交易为 Mortal Era (生命周期为 8 个区块，约 96 秒)
+    // 保护明文打新交易：若 20-30 秒内未能挤进前几个区块打包，则交易自动作废，防止后期滞后打包导致高价套牢
     if (cachedBlockHash && currentBlockHeight > 0) {
       options.blockHash = cachedBlockHash;
       options.era = { period: 8, current: currentBlockHeight };
@@ -737,160 +624,19 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
   });
 }
 
-// 核心层：MEV Shield 加密处理器 (双 Nonce 申请 -> 内层签名获取哈希 -> 加密提交 -> 全局解耦事件校验)
-async function sendMevShieldTx(innerTx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
-  const address = pair.address;
-
-  // A. 密钥与 Noble 库检查
-  const keysExpired = cachedNextKeyExpiresAt > 0 && currentBlockHeight >= cachedNextKeyExpiresAt;
-  const cannotEncrypt = !hasMevShieldPallet || !cachedNextKeyBytes || keysExpired || !ml_kem768;
-
-  if (cannotEncrypt) {
-    const reason = !hasMevShieldPallet ? '链上未启用 mevShield 模块' :
-                   keysExpired ? `密钥已过期 (当前高度: #${currentBlockHeight}, 失效高度: #${cachedNextKeyExpiresAt})` :
-                   '未获取到有效加密公钥或 noble 库未就绪';
-    log('WARN', `⚠️ [MEV安全降级] 自动安全降级为明文发送！原因: "${reason}"`);
-    return sendTx(innerTx, pair, txTimeoutMs, tip, null, meta);
-  }
-
-  // B. 申请双 Nonce
-  const doubleNonce = reserveNonce(address, true);
-  if (!doubleNonce || doubleNonce.outer === null || doubleNonce.inner === null) {
-    log('WARN', `⚠️ [MEV安全降级] 钱包【${address.slice(-6)}】双 Nonce 分配失败，自动降级为明文发送！`);
-    return sendTx(innerTx, pair, txTimeoutMs, tip, null, meta);
-  }
-
-  const { outer: outerNonce, inner: innerNonce } = doubleNonce;
-  let encryptionSuccessful = false;
-  let innerSignedHash = null;
-  let outerTx = null;
-  const pqStartTime = Date.now();
-
-  try {
-    // 签名内层交易 - inner 是真实 dispatch 的交易,用 mortal era 加固签名
-    // 官方:inner extrinsic 在 on_initialize 时 dispatch,会用当前区块校验签名
-    const innerOptions = { nonce: innerNonce };
-    if (cachedBlockHash && currentBlockHeight > 0) {
-      innerOptions.blockHash = cachedBlockHash;
-      innerOptions.era = { period: 64, current: currentBlockHeight }; // inner 允许长一点
-    } else {
-      innerOptions.era = 0; // 兜底:缓存未就绪
-    }
-    await innerTx.signAsync(pair, innerOptions);
-    
-    // 【从这里明确导出内层交易签名哈希】
-    innerSignedHash = innerTx.hash.toHex();
-    const innerTxBytes = innerTx.toU8a();
-
-    // 核心 PQ 加密
-    const keyHash = xxhashAsU8a(cachedNextKeyBytes, 128);
-    const { cipherText: kemCt, sharedSecret } = ml_kem768.encapsulate(cachedNextKeyBytes);
-    const nonceBytes = randomBytes(24);
-    const cipher = xchacha20poly1305(sharedSecret, nonceBytes);
-    const aeadCt = cipher.encrypt(innerTxBytes);
-
-    const kemLenBuf = Buffer.alloc(2);
-    kemLenBuf.writeUInt16LE(kemCt.length);
-
-    const packedCiphertext = Buffer.concat([
-      Buffer.from(keyHash),
-      kemLenBuf,
-      Buffer.from(kemCt),
-      Buffer.from(nonceBytes),
-      Buffer.from(aeadCt)
-    ]);
-
-    const ciphertextHex = '0x' + packedCiphertext.toString('hex');
-
-    // 生成 submitEncrypted 外层交易
-    outerTx = api.tx.mevShield.submitEncrypted(ciphertextHex);
-    encryptionSuccessful = true;
-    
-    const encryptDuration = Date.now() - pqStartTime;
-    log('INFO', `[MEV Shield 加密] 正在构建加密交易...\n` +
-                `  ├─ 密钥有效期: 剩余 ${cachedNextKeyExpiresAt - currentBlockHeight} 个区块 (当前: #${currentBlockHeight} / 失效: #${cachedNextKeyExpiresAt})\n` +
-                `  ├─ 内层真实哈希 (Inner): ${innerSignedHash}\n` +
-                `  ├─ 密文生成成功: PQ-KEM 封装并加密完成 | 耗时: ${encryptDuration}ms | 密文大小: ${packedCiphertext.length} 字节\n` +
-                `  └─ 外层交易已打包 (submitEncrypted)，准备广播...`);
-  } catch (err) {
-    log('ERROR', `❌ [MEV加密失败] 自动回退明文交易发送: ${err.message}`);
-    // 修正内存中的 Nonce 追踪：因为明文只用 1 个 nonce，下一个 nonce 应该为 outerNonce + 1
-    nextNonceByAddress.set(address, outerNonce + 1);
-    // 使用 outerNonce 发送明文交易以维持 nonce 序列的连续性
-    return sendTx(innerTx, pair, txTimeoutMs, tip, outerNonce, meta);
-  }
-
-  // C. 调用底层发送器发送外层加密包装交易
-  const sendRes = await sendTx(outerTx, pair, txTimeoutMs, tip, outerNonce, meta);
-  if (!sendRes.success) {
-    return sendRes;
-  }
-
-  // D. 外层发送成功，匹配解耦的区块事件以确定内层执行成败
-  let targetId = null;
-  if (sendRes.events && sendRes.events.length > 0) {
-    const submittedEvent = sendRes.events.find(({ event }) => event.section === 'mevShield' && event.method === 'EncryptedSubmitted');
-    if (submittedEvent) {
-      const idVal = submittedEvent.event.data.id || submittedEvent.event.data[0];
-      if (idVal) targetId = idVal.toString();
-    }
-  }
-
-  if (!targetId) {
-    return { success: false, error: 'MevShield execution verification failed: EncryptedSubmitted event not captured' };
-  }
-
-  const checkRes = await getMevShieldSuccess(sendRes.blockHash, targetId);
-  if (checkRes.success) {
-    return {
-      success: true,
-      hash: sendRes.hash,
-      outerHash: sendRes.hash,
-      innerHash: innerSignedHash,
-      isEncrypted: true,
-      blockHash: sendRes.blockHash,
-      blockNumber: sendRes.blockNumber,
-      txIndex: sendRes.txIndex
-    };
-  } else {
-    return { success: false, error: checkRes.error };
-  }
-}
-
 // 路由器层：策略路由分配器
 async function sendStrategicTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
-  const settings = database.getSettings();
-  let shouldEncrypt = false;
-  
-  if (meta && meta.label) {
-    const label = meta.label;
-    if (label.startsWith('新子网打新') || label.startsWith('打新')) {
-      shouldEncrypt = !!settings.dashingMevShieldEnabled;
-    } else if (label.startsWith('改名抢跑')) {
-      shouldEncrypt = !!settings.renameMevShieldEnabled;
-    } else if (label.startsWith('冷键交换抢跑')) {
-      shouldEncrypt = !!settings.swapMevShieldEnabled;
-    }
+  const res = await sendTx(tx, pair, txTimeoutMs, tip, null, meta);
+  if (res.success) {
+    return {
+      success: true,
+      hash: res.hash,
+      blockHash: res.blockHash,
+      blockNumber: res.blockNumber,
+      txIndex: res.txIndex
+    };
   }
-
-  if (shouldEncrypt) {
-    return sendMevShieldTx(tx, pair, txTimeoutMs, tip, meta);
-  } else {
-    const res = await sendTx(tx, pair, txTimeoutMs, tip, null, meta);
-    if (res.success) {
-      return {
-        success: true,
-        hash: res.hash,
-        outerHash: res.hash,
-        innerHash: null,
-        isEncrypted: false,
-        blockHash: res.blockHash,
-        blockNumber: res.blockNumber,
-        txIndex: res.txIndex
-      };
-    }
-    return res;
-  }
+  return { success: false, error: res.error };
 }
 
 // Extrinsic parser to map values using metadata names
@@ -1794,7 +1540,6 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
   
   if (label === '改名抢跑') {
     const cleanName = extraParams?.cleanName || '未知';
-    const encryptEnabled = !!settings.renameMevShieldEnabled;
     sendTelegramAlert(
       `🚀 <b>[改名抢跑 触发]</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
@@ -1803,13 +1548,11 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
       `• <b>拟改名称</b>: <code>${escapeHtml(cleanName)}</code>\n` +
       `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
       `• <b>单轮并发</b>: <code>${burstCount} 笔/钱包</code>\n` +
-      `• <b>加密状态</b>: <code>${encryptEnabled ? 'MEV Shield 加密' : '明文发送'}</code>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
       `<i>🔥 正在执行极速前置买入...</i>`
     );
   } else if (label === '冷键交换抢跑') {
     const oldColdkey = extraParams?.oldColdkey || '未知';
-    const encryptEnabled = !!settings.swapMevShieldEnabled;
     sendTelegramAlert(
       `🚀 <b>[冷键交换抢跑 触发]</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
@@ -1817,7 +1560,6 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
       `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
       `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
       `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
-      `• <b>加密状态</b>: <code>${encryptEnabled ? 'MEV Shield 加密' : '明文发送'}</code>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
       `<i>🔥 正在执行抢跑买入...</i>`
     );
@@ -1850,18 +1592,12 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
               detectedAt: extraParams?.detectedAt || Date.now()
             }).then(res => {
               if (res.success) {
-                const hashLog = res.isEncrypted 
-                  ? `加密外层哈希: ${res.outerHash}, 内层哈希: ${res.innerHash}`
-                  : `交易哈希: ${res.hash}`;
-                log('SUCCESS', `[${label} 成功] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！${hashLog}`);
+                log('SUCCESS', `[${label} 成功] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！交易哈希: ${res.hash}`);
                 dashingSuccessByNetuid.set(successKey, true);
-                
-                const hashAlert = res.isEncrypted
-                  ? `加密外层哈希 (Outer): <code>${res.outerHash}</code>\n内层真实哈希 (Inner): <code>${res.innerHash}</code>`
-                  : `交易哈希: <code>${res.hash}</code>`;
+
                 const blockStr = res.blockNumber ? `• <b>成交区块</b>: <code>#${res.blockNumber}</code>\n` : '';
                 const idxStr = res.txIndex ? `• <b>排队位置</b>: <code>第 ${res.txIndex} 笔交易</code>\n` : '';
-                
+
                 sendTelegramAlert(
                   `✅ <b>[${label} 成功]</b>\n` +
                   `━━━━━━━━━━━━━━━━━━\n` +
@@ -1869,7 +1605,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
                   `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
                   blockStr +
                   idxStr +
-                  `• <b>${res.isEncrypted ? '加密交易' : '交易哈希'}</b>: ${hashAlert}\n` +
+                  `• <b>交易哈希</b>: <code>${res.hash}</code>\n` +
                   `━━━━━━━━━━━━━━━━━━`
                 );
                 return res;
@@ -2098,29 +1834,20 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
         label: `${label}-超时重试#${attemptNum}`
       }).then(res => {
         if (res.success) {
-          const hashLog = res.isEncrypted 
-            ? `加密外层哈希: ${res.outerHash}, 内层哈希: ${res.innerHash}`
-            : `交易哈希: ${res.hash}`;
-          log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！${hashLog}`);
+          log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！交易哈希: ${res.hash}`);
           dashingSuccessByNetuid.set(successKey, true);
-          
+
           if (successfulSnipes) {
             successfulSnipes.push({
               walletName: w.name,
               attempt: `重试#${attemptNum}`,
               burstIndex: 1,
-              isEncrypted: res.isEncrypted,
-              hash: res.hash,
-              outerHash: res.outerHash,
-              innerHash: res.innerHash
+              hash: res.hash
             });
           } else {
-            const hashAlert = res.isEncrypted
-              ? `加密外层哈希 (Outer): <code>${res.outerHash}</code>\n内层真实哈希 (Inner): <code>${res.innerHash}</code>`
-              : `交易哈希: <code>${res.hash}</code>`;
             const blockStr = res.blockNumber ? `• <b>成交区块</b>: <code>#${res.blockNumber}</code>\n` : '';
             const idxStr = res.txIndex ? `• <b>排队位置</b>: <code>第 ${res.txIndex} 笔交易</code>\n` : '';
-            
+
             sendTelegramAlert(
               `✅ <b>[${label} 超时重试成功]</b>\n` +
               `━━━━━━━━━━━━━━━━━━\n` +
@@ -2129,7 +1856,7 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
               `• <b>重试次数</b>: <code>${attemptNum}</code>\n` +
               blockStr +
               idxStr +
-              `• <b>${res.isEncrypted ? '加密交易' : '交易哈希'}</b>: ${hashAlert}\n` +
+              `• <b>交易哈希</b>: <code>${res.hash}</code>\n` +
               `━━━━━━━━━━━━━━━━━━`
             );
           }
@@ -2277,17 +2004,11 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`
             }).then(res => {
               if (res.success) {
-                const hashLog = res.isEncrypted 
-                  ? `加密外层哈希: ${res.outerHash}, 内层哈希: ${res.innerHash}`
-                  : `交易哈希: ${res.hash}`;
-                log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！${hashLog}`);
+                log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！交易哈希: ${res.hash}`);
                 // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
                 dashingSuccessByNetuid.set(successKey, true);
-                
-                const hashAlert = res.isEncrypted
-                  ? `加密外层哈希 (Outer): ${res.outerHash}\n内层真实哈希 (Inner): ${res.innerHash}`
-                  : `交易哈希: ${res.hash}`;
-                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${escapeHtml(w.name)}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n${hashAlert}`);
+
+                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${escapeHtml(w.name)}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
                 return res;
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
@@ -2718,7 +2439,6 @@ async function connectWs(reason = 'Normal Boot') {
 
     log('INFO', '[API初始化] 正在配置多节点广播组件并启动节点延迟测试...');
     initBroadcastNodes();
-    await initNoblePQ();
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
     if (broadcastLatencyTimer) clearInterval(broadcastLatencyTimer);
     broadcastLatencyTimer = setInterval(testBroadcastNodes, 10000);
@@ -2743,7 +2463,6 @@ async function connectWs(reason = 'Normal Boot') {
       const blockNumber = header.number.toNumber();
       currentBlockHeight = blockNumber;
       cachedBlockHash = header.hash; // 更新区块 hash 缓存
-      updateMevShieldKeys().catch(() => {});
       if (global.blockCallback) {
         global.blockCallback(blockNumber);
       }

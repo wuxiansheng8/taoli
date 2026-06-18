@@ -302,7 +302,6 @@ async function loadConfig() {
     
     // Apply Strategies tab values
     document.getElementById('strat-dashing-enabled').checked = cfg.dashingEnabled;
-    document.getElementById('strat-dashing-mevshield').checked = !!cfg.dashingMevShieldEnabled;
     document.getElementById('strat-dashing-amount').value = cfg.dashingAmount;
     document.getElementById('strat-dashing-burst').value = cfg.dashingBurstCount !== undefined ? cfg.dashingBurstCount : 1;
     document.getElementById('strat-dashing-retries').value = cfg.dashingRetries;
@@ -313,7 +312,6 @@ async function loadConfig() {
     document.getElementById('strat-dashing-double-delay').value = cfg.dashingDoubleStakingDelay !== undefined ? cfg.dashingDoubleStakingDelay : '';
     
     document.getElementById('strat-rename-enabled').checked = cfg.renameEnabled;
-    document.getElementById('strat-rename-mevshield').checked = !!cfg.renameMevShieldEnabled;
     document.getElementById('strat-rename-amount').value = cfg.renameAmount !== undefined ? cfg.renameAmount : 100;
     document.getElementById('strat-rename-tip').value = cfg.renameTip;
     document.getElementById('strat-rename-burst').value = cfg.renameBurstCount !== undefined ? cfg.renameBurstCount : 1;
@@ -323,7 +321,6 @@ async function loadConfig() {
     document.getElementById('strat-rename-timeout-retries').value = cfg.renameTimeoutRetries !== undefined ? cfg.renameTimeoutRetries : 0;
     
     document.getElementById('strat-swap-enabled').checked = cfg.swapEnabled;
-    document.getElementById('strat-swap-mevshield').checked = !!cfg.swapMevShieldEnabled;
     document.getElementById('strat-swap-amount').value = cfg.swapAmount !== undefined ? cfg.swapAmount : 100;
     document.getElementById('strat-swap-tip').value = cfg.swapTip;
     document.getElementById('strat-swap-burst').value = cfg.swapBurstCount !== undefined ? cfg.swapBurstCount : 1;
@@ -370,7 +367,6 @@ async function loadConfig() {
 async function saveStrategies() {
   const payload = {
     dashingEnabled: document.getElementById('strat-dashing-enabled').checked,
-    dashingMevShieldEnabled: document.getElementById('strat-dashing-mevshield').checked,
     dashingAmount: Number(document.getElementById('strat-dashing-amount').value),
     dashingBurstCount: Number(document.getElementById('strat-dashing-burst').value || 1),
     dashingRetries: Number(document.getElementById('strat-dashing-retries').value),
@@ -381,7 +377,6 @@ async function saveStrategies() {
     dashingDoubleStakingDelay: Number(document.getElementById('strat-dashing-double-delay').value || 0),
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,
-    renameMevShieldEnabled: document.getElementById('strat-rename-mevshield').checked,
     renameAmount: Number(document.getElementById('strat-rename-amount').value || 100),
     renameTip: Number(document.getElementById('strat-rename-tip').value),
     renameBurstCount: Number(document.getElementById('strat-rename-burst').value || 1),
@@ -391,7 +386,6 @@ async function saveStrategies() {
     renameTimeoutRetries: Number(document.getElementById('strat-rename-timeout-retries').value || 0),
     
     swapEnabled: document.getElementById('strat-swap-enabled').checked,
-    swapMevShieldEnabled: document.getElementById('strat-swap-mevshield').checked,
     swapAmount: Number(document.getElementById('strat-swap-amount').value || 100),
     swapTip: Number(document.getElementById('strat-swap-tip').value),
     swapBurstCount: Number(document.getElementById('strat-swap-burst').value || 1),

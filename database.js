@@ -57,7 +57,6 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: New Subnet Auto Register
   dashingEnabled: true,
-  dashingMevShieldEnabled: false,
   dashingAmount: 100, // TAO to register
   dashingRetries: 10,
   dashingIntervalMs: 1000,
@@ -70,7 +69,6 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,
-  renameMevShieldEnabled: false,
   renameAmount: 100,
   renameTip: 2.0,
   renameSlippageLimit: 0.05, // 5% slippage
@@ -82,7 +80,6 @@ const DEFAULT_SETTINGS = {
   
   // Strategy: Coldkey Swap Frontrun
   swapEnabled: true,
-  swapMevShieldEnabled: false,
   swapAmount: 100,
   swapTip: 5.0,
   swapSlippageLimit: 0.05, // 5% slippage
@@ -145,6 +142,10 @@ function getSettings() {
   try {
     const rawData = fs.readFileSync(SETTINGS_FILE, 'utf8');
     const settings = JSON.parse(rawData);
+    // 主动剔除历史配置文件里的旧 MEV 属性，让其自动退场
+    delete settings.dashingMevShieldEnabled;
+    delete settings.renameMevShieldEnabled;
+    delete settings.swapMevShieldEnabled;
     return { ...DEFAULT_SETTINGS, ...settings };
   } catch (e) {
     console.error('Error reading settings file, using defaults:', e);
