@@ -1633,7 +1633,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
               } else {
                 log('ERROR', `[${label} 失败] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && timeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, hotkey, 1, timeoutRetries, timeoutMs, amountTao, slippageLimit, tip, label);
+                  return executeTimeoutRetry(w, netuid, hotkey, 1, timeoutRetries, timeoutMs, amountTao, slippageLimit, null, tip, label);
                 }
                 return res;
               }
