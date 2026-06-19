@@ -819,28 +819,49 @@ async function getSubnetPrice(netuid) {
 }
 
 // Build addStake or addStakeLimit based on metadata compatibility
-async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit) {
+async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit, maxPriceLimit = 0, passedPrice = null) {
   const hasLimitCall = typeof api.tx.subtensorModule.addStakeLimit === 'function';
-  if (slippageLimit !== undefined) {
+  
+  const hasLimitProtection = (slippageLimit !== undefined && slippageLimit !== null && slippageLimit > 0) || 
+                            (maxPriceLimit !== undefined && maxPriceLimit !== null && maxPriceLimit > 0);
+
+  if (hasLimitProtection) {
     if (hasLimitCall) {
-      const currentPrice = await getSubnetPrice(netuid);
+      let currentPrice = passedPrice;
+      if (currentPrice === null) {
+        currentPrice = await getSubnetPrice(netuid);
+      }
+      
       if (currentPrice !== null) {
         const settings = database.getSettings();
-        const slippageMultiplier = 1.0 + parseFloat(slippageLimit);
-        const limitPrice = BigInt(Math.floor(Number(currentPrice) * slippageMultiplier));
-        const allowPartial = settings.allowPartialStaking !== false;
+        const priceInTao = Number(currentPrice) / 1e9;
         
-        // 成功获取价格时保持静默
+        // 校验是否硬超限（在 buildStakeTx 内部做二次兜底校验，主要防超时重试等其它调用渠道未检查）
+        if (maxPriceLimit > 0 && priceInTao > maxPriceLimit) {
+          throw new Error(`Price exceeds limit: current ${priceInTao.toFixed(4)} TAO/Alpha, limit ${maxPriceLimit.toFixed(4)} TAO/Alpha`);
+        }
+        
+        let limitPrice;
+        if (slippageLimit > 0 && maxPriceLimit > 0) {
+          const slippageMultiplier = 1.0 + parseFloat(slippageLimit);
+          const slipLimitBig = BigInt(Math.floor(Number(currentPrice) * slippageMultiplier));
+          const maxLimitBig = BigInt(Math.floor(maxPriceLimit * 1e9));
+          limitPrice = slipLimitBig < maxLimitBig ? slipLimitBig : maxLimitBig;
+        } else if (slippageLimit > 0) {
+          const slippageMultiplier = 1.0 + parseFloat(slippageLimit);
+          limitPrice = BigInt(Math.floor(Number(currentPrice) * slippageMultiplier));
+        } else {
+          // 仅启用了最高限价，无滑点相对限制
+          limitPrice = BigInt(Math.floor(maxPriceLimit * 1e9));
+        }
+        
+        const allowPartial = settings.allowPartialStaking !== false;
         return api.tx.subtensorModule.addStakeLimit(hotkey, netuid, amountBigInt, limitPrice, allowPartial);
       } else {
-        // 未能获取价格时触发降级中文报警
-        log('WARN', `[警告] 未能获取到子网 #${netuid} 的当前价格，限价保护失效！已降级为市价质押（存在被夹风险）`);
-        sendTelegramAlert(`⚠️ <b>[限价降级警告]</b>\n未能获取到子网 #${netuid} 的当前价格，限价保护失效！\n已降级为市价质押（存在被夹风险）。`).catch(() => {});
+        log('WARN', `⚠️ [限价保护] 未能获取到子网 #${netuid} 的当前价格，限价保护失效！已自动降级为市价质押（普通 addStake 交易），以优先保证打新速度。`);
       }
     } else {
-      // 节点不支持限价调用
-      log('WARN', `[警告] 链上节点不支持限价质押方法，已降级为市价质押`);
-      sendTelegramAlert(`⚠️ <b>[限价降级警告]</b>\n链上节点不支持限价质押方法，已降级为市价质押。`).catch(() => {});
+      log('WARN', `⚠️ [限价保护] 链上节点不支持限价质押方法，已自动降级为市价质押（普通 addStake 交易）。`);
     }
   }
   return api.tx.subtensorModule.addStake(hotkey, netuid, amountBigInt);
@@ -1786,7 +1807,20 @@ async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
 }
 
 // Helper for timeout retries
-async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeoutRetries = null, customTimeoutMs = null, customAmount = null, customSlippageLimit = null, customTip = null, label = '新子网打新', successfulSnipes = null) {
+async function executeTimeoutRetry(
+  w,
+  netuid,
+  targetHotkey,
+  attemptNum,
+  maxTimeoutRetries = null,
+  customTimeoutMs = null,
+  customAmount = null,
+  customSlippageLimit = null,
+  customMaxPriceLimit = null,
+  customTip = null,
+  label = '新子网打新',
+  successfulSnipes = null
+) {
   const settings = database.getSettings();
   const actualMaxRetries = maxTimeoutRetries !== null ? maxTimeoutRetries : (settings.dashingTimeoutRetries || 0);
   if (attemptNum > actualMaxRetries) return { success: false, error: 'Max timeout retries reached' };
@@ -1820,10 +1854,18 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
   const actualTip = customTip !== null ? customTip : settings.dashingTip;
   const actualTimeoutMs = customTimeoutMs !== null ? customTimeoutMs : (settings.dashingTimeoutMs || 30000);
   
+  // 确认 maxPriceLimit 的来源（支持参数传入或使用 settings 对应策略通道的默认配置）
+  const isDoubleStaking = label.endsWith('DoubleStaking');
+  const actualMaxPriceLimit = customMaxPriceLimit !== null 
+    ? customMaxPriceLimit 
+    : (isDoubleStaking ? Number(settings.dashingDoubleMaxPrice || 0) : Number(settings.dashingMaxPrice || 0));
+  
   try {
     const targetTip = actualTip;
     const amountBigInt = BigInt(Math.floor(actualAmount * 1e9));
-    const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit);
+    
+    // 调用 buildStakeTx，传入 actualMaxPriceLimit，由于重试没有缓存在 round 里的价格，传入 null 让其自动 RPC 获取最新价格
+    const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit, actualMaxPriceLimit, null);
     
     const p = new Promise((resolve) => {
       sendStrategicTx(tx, w.pair, actualTimeoutMs, targetTip, {
@@ -1836,7 +1878,7 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
         if (res.success) {
           log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！交易哈希: ${res.hash}`);
           dashingSuccessByNetuid.set(successKey, true);
-
+ 
           if (successfulSnipes) {
             successfulSnipes.push({
               walletName: w.name,
@@ -1847,7 +1889,7 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
           } else {
             const blockStr = res.blockNumber ? `• <b>成交区块</b>: <code>#${res.blockNumber}</code>\n` : '';
             const idxStr = res.txIndex ? `• <b>排队位置</b>: <code>第 ${res.txIndex} 笔交易</code>\n` : '';
-
+ 
             sendTelegramAlert(
               `✅ <b>[${label} 超时重试成功]</b>\n` +
               `━━━━━━━━━━━━━━━━━━\n` +
@@ -1864,22 +1906,29 @@ async function executeTimeoutRetry(w, netuid, targetHotkey, attemptNum, maxTimeo
         } else {
           log('ERROR', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】交易失败: ${res.error}`);
           if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout'))) {
-            executeTimeoutRetry(w, netuid, targetHotkey, attemptNum + 1, actualMaxRetries, actualTimeoutMs, actualAmount, actualSlippageLimit, actualTip, label).then(resolve);
+            executeTimeoutRetry(w, netuid, targetHotkey, attemptNum + 1, actualMaxRetries, actualTimeoutMs, actualAmount, actualSlippageLimit, actualMaxPriceLimit, actualTip, label, successfulSnipes).then(resolve);
           } else {
             resolve(res);
           }
         }
       });
     });
-
+ 
     if (attemptNum === 1) {
       p.finally(() => {
         activeTimeoutRetryNumByWallet.delete(key);
       });
     }
-
+ 
     return p;
   } catch (e) {
+    if (e.message.includes('Price exceeds limit')) {
+      log('WARN', `⚠️ [${label}] 超时重试已终止：交易价格已超过最高价格限制！`);
+      if (attemptNum === 1) {
+        activeTimeoutRetryNumByWallet.delete(key);
+      }
+      return { success: false, error: e.message };
+    }
     log('ERROR', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】发起异常: ${e.message}`);
     if (attemptNum === 1) {
       activeTimeoutRetryNumByWallet.delete(key);
@@ -1972,15 +2021,21 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
   // 收集所有异步发出的交易 Promise，以实现动态解锁
   const txPromises = [];
+  let stoppedByPriceLimit = false;
 
   const targetTip = settings.dashingTip;
   const burstCount = Math.max(1, settings.dashingBurstCount || 1);
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
+  
+  // 获取最大价格限额
+  const maxPriceLimit = isDoubleStaking && settings.dashingDoubleMaxPrice !== undefined
+    ? Number(settings.dashingDoubleMaxPrice || 0)
+    : Number(settings.dashingMaxPrice || 0);
 
-    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
-  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
+  log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大价格限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
+  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n最大价格限价: ${maxPriceLimit} TAO/Alpha\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
 
   try {
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -1990,12 +2045,32 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
         break;
       }
 
+      // 1. 在每轮扫射开始时集中只查一次价格，免去多个小号重复 RPC 带来的延迟
+      let currentPrice = null;
+      if (maxPriceLimit > 0 || (slippageLimit !== undefined && slippageLimit !== null && slippageLimit > 0)) {
+        currentPrice = await getSubnetPrice(netuid);
+      }
+
+      // 2. 如果价格超限，则标记价格保护并终止整轮扫射和后续尝试
+      if (maxPriceLimit > 0 && currentPrice !== null) {
+        const priceInTao = Number(currentPrice) / 1e9;
+        if (priceInTao > maxPriceLimit) {
+          log('WARN', `⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`);
+          sendTelegramAlert(`⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`).catch(() => {});
+          stoppedByPriceLimit = true;
+          break; // 直接退出扫射循环
+        }
+      } else if (maxPriceLimit > 0 && currentPrice === null) {
+        log('WARN', `⚠️ [新子网打新] 无法获取当前子网 #${netuid} 价格！已跳过前置限价校验，将自动降级为普通市价质押（addStake）强行买入，以优先保证打新速度！`);
+      }
+
       log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
       
       for (const w of activeWallets) {
         for (let i = 0; i < burstCount; i++) {
           try {
-            const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, slippageLimit);
+            // 透传 currentPrice 避免内部重复查价格，降低 RPC 交互延迟
+            const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, slippageLimit, maxPriceLimit, currentPrice);
             log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
@@ -2016,7 +2091,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, slippageLimit, settings.dashingTip, retryLabel);
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, slippageLimit, maxPriceLimit, settings.dashingTip, retryLabel);
                 }
                 return res;
               }
@@ -2060,9 +2135,15 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       // 若一笔交易都未发出（例如 buildStakeTx 抛错），延迟短窗口解锁，防止下个区块到达时瞬间再次重复触发
       setTimeout(unlock, Math.max(3000, interval));
       
-      const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
-      log('ERROR', msg);
-      sendTelegramAlert(msg).catch(() => {});
+      if (stoppedByPriceLimit) {
+        const msg = `⚠️ [新子网打新 停止]\n子网: #${netuid}\n触发源: ${triggerSource}\n原因: 价格保护触发，已按配置停止买入`;
+        log('WARN', msg);
+        sendTelegramAlert(msg).catch(() => {});
+      } else {
+        const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
+        log('ERROR', msg);
+        sendTelegramAlert(msg).catch(() => {});
+      }
     }
   }
 }

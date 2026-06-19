@@ -62,11 +62,13 @@ const DEFAULT_SETTINGS = {
   dashingIntervalMs: 1000,
   dashingTimeoutMs: 30000,
   dashingTip: 1.0, // extra priority tip
-  dashingSlippageLimit: 0.10, // 10% slippage for register buy-in
+  dashingSlippageLimit: 0, // 留空为不限制相对滑点，直接为 0 (禁用)
   dashingBurstCount: 1, // number of concurrent staking transactions per wallet
   dashingDoubleStakingDelay: 0, // delay in seconds for second buy-in
-  dashingDoubleSlippageLimit: 0.05, // 5% slippage limit for secondary delayed buy-in
+  dashingDoubleSlippageLimit: 0, // 留空为不限制相对滑点，直接为 0 (禁用)
   dashingTimeoutRetries: 0,
+  dashingMaxPrice: 0, // 主线最大价格限制 (TAO/Alpha, 0为无限制)
+  dashingDoubleMaxPrice: 0, // 二次延迟最大价格限制 (TAO/Alpha, 0为无限制)
   
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,

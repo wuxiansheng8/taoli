@@ -311,6 +311,8 @@ async function loadConfig() {
     document.getElementById('strat-dashing-tip').value = cfg.dashingTip;
     document.getElementById('strat-dashing-double-delay').value = cfg.dashingDoubleStakingDelay !== undefined ? cfg.dashingDoubleStakingDelay : '';
     document.getElementById('strat-dashing-double-slippage').value = cfg.dashingDoubleSlippageLimit !== undefined ? cfg.dashingDoubleSlippageLimit : '';
+    document.getElementById('strat-dashing-max-price').value = cfg.dashingMaxPrice !== undefined ? cfg.dashingMaxPrice : '';
+    document.getElementById('strat-dashing-double-max-price').value = cfg.dashingDoubleMaxPrice !== undefined ? cfg.dashingDoubleMaxPrice : '';
     
     document.getElementById('strat-rename-enabled').checked = cfg.renameEnabled;
     document.getElementById('strat-rename-amount').value = cfg.renameAmount !== undefined ? cfg.renameAmount : 100;
@@ -366,6 +368,23 @@ async function loadConfig() {
 
 // Save all strategy settings
 async function saveStrategies() {
+  const dashingSlippage = document.getElementById('strat-dashing-slippage').value !== '' ? Number(document.getElementById('strat-dashing-slippage').value) : 0;
+  const dashingMaxPrice = document.getElementById('strat-dashing-max-price').value !== '' ? Number(document.getElementById('strat-dashing-max-price').value) : 0;
+  
+  if (dashingSlippage <= 0 && dashingMaxPrice <= 0) {
+    alert('【主线打新校验失败】：滑点限制与最高价格限制不能同时为空或为 0！必须至少填写一个以防被夹（Sandwich Attack）。');
+    return;
+  }
+  
+  const doubleDelay = Number(document.getElementById('strat-dashing-double-delay').value || 0);
+  const dashingDoubleSlippage = document.getElementById('strat-dashing-double-slippage').value !== '' ? Number(document.getElementById('strat-dashing-double-slippage').value) : 0;
+  const dashingDoubleMaxPrice = document.getElementById('strat-dashing-double-max-price').value !== '' ? Number(document.getElementById('strat-dashing-double-max-price').value) : 0;
+  
+  if (doubleDelay > 0 && dashingDoubleSlippage <= 0 && dashingDoubleMaxPrice <= 0) {
+    alert('【二次延迟校验失败】：已配置延迟时间，但二次延迟的滑点限制与最高价格限制不能同时为空或为 0！必须至少填写一个以防被夹（Sandwich Attack）。');
+    return;
+  }
+
   const payload = {
     dashingEnabled: document.getElementById('strat-dashing-enabled').checked,
     dashingAmount: Number(document.getElementById('strat-dashing-amount').value),
@@ -375,8 +394,9 @@ async function saveStrategies() {
     dashingTimeoutMs: Number(document.getElementById('strat-dashing-timeout').value),
     dashingTimeoutRetries: Number(document.getElementById('strat-dashing-timeout-retries').value || 0),
     dashingTip: Number(document.getElementById('strat-dashing-tip').value),
-    dashingDoubleStakingDelay: Number(document.getElementById('strat-dashing-double-delay').value || 0),
-    dashingDoubleSlippageLimit: document.getElementById('strat-dashing-double-slippage').value !== '' ? Number(document.getElementById('strat-dashing-double-slippage').value) : 0.05,
+    dashingDoubleStakingDelay: doubleDelay,
+    dashingDoubleSlippageLimit: dashingDoubleSlippage,
+    dashingDoubleMaxPrice: dashingDoubleMaxPrice,
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,
     renameAmount: Number(document.getElementById('strat-rename-amount').value || 100),
@@ -404,7 +424,8 @@ async function saveStrategies() {
     sandwichAutoSell: document.getElementById('strat-sandwich-autosell').checked,
     
     // Slippage Limits
-    dashingSlippageLimit: document.getElementById('strat-dashing-slippage').value !== '' ? Number(document.getElementById('strat-dashing-slippage').value) : 0.10,
+    dashingSlippageLimit: dashingSlippage,
+    dashingMaxPrice: dashingMaxPrice,
     renameSlippageLimit: document.getElementById('strat-rename-slippage').value !== '' ? Number(document.getElementById('strat-rename-slippage').value) : 0.05,
     swapSlippageLimit: document.getElementById('strat-swap-slippage').value !== '' ? Number(document.getElementById('strat-swap-slippage').value) : 0.05,
     sandwichSlippageLimit: document.getElementById('strat-sandwich-slippage').value !== '' ? Number(document.getElementById('strat-sandwich-slippage').value) : 0.05,
