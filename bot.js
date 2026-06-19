@@ -1669,33 +1669,6 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
   const targetTip = tip;
   log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
   
-  if (label === '改名抢跑') {
-    const cleanName = extraParams?.cleanName || '未知';
-    sendTelegramAlert(
-      `🚀 <b>[改名抢跑 触发]</b>\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
-      `• <b>触发来源</b>: <code>Mempool-扫描</code>\n` +
-      `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
-      `• <b>拟改名称</b>: <code>${escapeHtml(cleanName)}</code>\n` +
-      `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
-      `• <b>单轮并发</b>: <code>${burstCount} 笔/钱包</code>\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
-      `<i>🔥 正在执行极速前置买入...</i>`
-    );
-  } else if (label === '冷键交换抢跑') {
-    const oldColdkey = extraParams?.oldColdkey || '未知';
-    sendTelegramAlert(
-      `🚀 <b>[冷键交换抢跑 触发]</b>\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
-      `• <b>触发来源</b>: <code>Mempool-扫描</code>\n` +
-      `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
-      `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
-      `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
-      `<i>🔥 正在执行抢跑买入...</i>`
-    );
-  }
-
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
   const txPromises = [];
 
@@ -2248,7 +2221,6 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       if (stoppedByPriceLimit) {
         const msg = `⚠️ [新子网打新 停止]\n子网: #${netuid}\n触发源: ${triggerSource}\n原因: 价格保护触发，已按配置停止买入`;
         log('WARN', msg);
-        sendTelegramAlert(msg).catch(() => {});
       } else {
         const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
         log('ERROR', msg);
