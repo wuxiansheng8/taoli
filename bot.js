@@ -1899,8 +1899,11 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     return;
   }
 
-  // 1. 防重复运行锁（基于 netuid）：如果当前子网的打新循环已在运行，直接拦截
+    // 1. 防重复运行锁（基于 netuid）：如果当前子网的打新循环已在运行，直接拦截
   const isDoubleStaking = triggerSource.startsWith('DoubleStaking');
+  const slippageLimit = isDoubleStaking && settings.dashingDoubleSlippageLimit !== undefined
+    ? settings.dashingDoubleSlippageLimit
+    : settings.dashingSlippageLimit;
   const retryLabel = isDoubleStaking ? '新子网打新:DoubleStaking' : '新子网打新:Primary';
   if (!isDoubleStaking && activeSnipesByNetuid.has(netuid)) {
     log('INFO', `[新子网打新] [触发源: ${triggerSource}] 子网 #${netuid} 打新抢购循环已经在运行中，跳过重复触发。`);
@@ -1976,8 +1979,8 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
 
-  log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
-  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
+    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
+  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
 
   try {
     for (let attempt = 0; attempt < retries; attempt++) {
@@ -1992,7 +1995,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       for (const w of activeWallets) {
         for (let i = 0; i < burstCount; i++) {
           try {
-            const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, settings.dashingSlippageLimit);
+            const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, slippageLimit);
             log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
@@ -2000,7 +2003,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               netuid,
               hotkey: targetHotkey,
               amountBigInt,
-              slippageLimit: settings.dashingSlippageLimit,
+              slippageLimit: slippageLimit,
               label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`
             }).then(res => {
               if (res.success) {
@@ -2013,7 +2016,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, settings.dashingSlippageLimit, settings.dashingTip, retryLabel);
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, slippageLimit, settings.dashingTip, retryLabel);
                 }
                 return res;
               }

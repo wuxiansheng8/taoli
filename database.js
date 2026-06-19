@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS = {
   dashingSlippageLimit: 0.10, // 10% slippage for register buy-in
   dashingBurstCount: 1, // number of concurrent staking transactions per wallet
   dashingDoubleStakingDelay: 0, // delay in seconds for second buy-in
+  dashingDoubleSlippageLimit: 0.05, // 5% slippage limit for secondary delayed buy-in
   dashingTimeoutRetries: 0,
   
   // Strategy: Subnet Rename Frontrun
