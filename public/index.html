@@ -214,10 +214,13 @@
                 <h3>🚀 策略 1: 新建立子网 Staking 抢购 (Staking Sniping)</h3>
                 <p class="card-desc">当监控到所有者发送 startCall 激活子网交易的瞬间（或区块自愈补扫时），立即使用全局默认 Hotkey 极速发起多笔 Staking 抢购，并支持配置二次延时买入。</p>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="strat-dashing-enabled">
-                <span class="slider"></span>
-              </label>
+              <div class="strategy-action-group">
+                <button type="button" class="btn btn-secondary btn-sm btn-clear-cooldown" data-strategy="new-subnet">清理冷却</button>
+                <label class="switch">
+                  <input type="checkbox" id="strat-dashing-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
             </div>
             <div class="strategy-settings grid-settings-2-rows">
               <div class="setting-item">
@@ -281,10 +284,13 @@
                 <h3>🎯 策略 2: 子网改名抢跑 (Rename Frontrun)</h3>
                 <p class="card-desc">监听到子网改名非默认占位符名称（如 setSubnetIdentity）时，立刻代表小号钱包前抢买入锁定份额。</p>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="strat-rename-enabled">
-                <span class="slider"></span>
-              </label>
+              <div class="strategy-action-group">
+                <button type="button" class="btn btn-secondary btn-sm btn-clear-cooldown" data-strategy="rename">清理冷却</button>
+                <label class="switch">
+                  <input type="checkbox" id="strat-rename-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
             </div>
             <div class="strategy-settings grid-settings-2-rows">
               <div class="setting-item">
@@ -329,10 +335,13 @@
                 <h3>🔒 策略 3: 冷键交换声明/执行抢跑 (Swap Frontrun)</h3>
                 <p class="card-desc">监听到子网所属冷键提交 `announceColdkeySwap` 或 `swapColdkey` 时，立即匹配该冷键下属子网自动执行抢买。</p>
               </div>
-              <label class="switch">
-                <input type="checkbox" id="strat-swap-enabled">
-                <span class="slider"></span>
-              </label>
+              <div class="strategy-action-group">
+                <button type="button" class="btn btn-secondary btn-sm btn-clear-cooldown" data-strategy="coldkey-swap">清理冷却</button>
+                <label class="switch">
+                  <input type="checkbox" id="strat-swap-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
             </div>
             <div class="strategy-settings grid-settings-2-rows">
               <div class="setting-item">

@@ -2769,6 +2769,58 @@ function stopBot() {
   log('INFO', '套利机器人已安全关闭。');
 }
 
+function clearCooldown(strategy) {
+  try {
+    // 1. 清理持久化数据库冷却记录
+    const clearedCount = database.clearCooldownsByStrategy(strategy);
+    
+    // 2. 清理内存中的防重打新成功状态 (dashingSuccessByNetuid)
+    let memoryClearedCount = 0;
+    for (const key of dashingSuccessByNetuid.keys()) {
+      if (
+        (strategy === 'new-subnet' && key.startsWith('新子网打新:')) ||
+        (strategy === 'rename' && key.startsWith('改名抢跑:')) ||
+        (strategy === 'coldkey-swap' && key.startsWith('冷键交换抢跑:'))
+      ) {
+        dashingSuccessByNetuid.delete(key);
+        memoryClearedCount++;
+      }
+    }
+    
+    // 3. 清理对应的运行锁 (activeSnipesByNetuid)
+    let lockClearedCount = 0;
+    for (const key of Array.from(activeSnipesByNetuid)) {
+      if (strategy === 'new-subnet') {
+        if (typeof key === 'number' || (typeof key === 'string' && !key.startsWith('lock:'))) {
+          activeSnipesByNetuid.delete(key);
+          lockClearedCount++;
+        }
+      } else if (strategy === 'rename') {
+        if (typeof key === 'string' && key.startsWith('lock:改名抢跑:')) {
+          activeSnipesByNetuid.delete(key);
+          lockClearedCount++;
+        }
+      } else if (strategy === 'coldkey-swap') {
+        if (typeof key === 'string' && key.startsWith('lock:冷键交换抢跑:')) {
+          activeSnipesByNetuid.delete(key);
+          lockClearedCount++;
+        }
+      }
+    }
+    
+    log('INFO', `[清理冷却] 清理了策略 [${strategy}] 的冷却与运行锁。已删除 ${clearedCount} 个持久化记录、${memoryClearedCount} 个内存状态和 ${lockClearedCount} 个运行锁。`);
+    return {
+      success: true,
+      clearedCount,
+      memoryClearedCount,
+      lockClearedCount
+    };
+  } catch (e) {
+    log('ERROR', `[清理冷却] 失败: ${e.message}`);
+    return { success: false, error: e.message };
+  }
+}
+
 // Export API
 module.exports = {
   startBot,
@@ -2790,5 +2842,6 @@ module.exports = {
     serverTime: Date.now()
   }),
   setLogCallback: (cb) => { global.logCallback = cb; },
-  setBlockCallback: (cb) => { global.blockCallback = cb; }
+  setBlockCallback: (cb) => { global.blockCallback = cb; },
+  clearCooldown
 };

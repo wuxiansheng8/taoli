@@ -263,6 +263,27 @@ app.post('/api/wallets/reload', requireAuth, async (req, res) => {
   }
 });
 
+app.post('/api/cooldown/clear', requireAuth, (req, res) => {
+  const { strategy } = req.body;
+  
+  const allowedStrategies = ['new-subnet', 'rename', 'coldkey-swap'];
+  if (!strategy || !allowedStrategies.includes(strategy)) {
+    return res.status(400).json({ success: false, error: '无效的策略类型！' });
+  }
+  
+  const result = bot.clearCooldown(strategy);
+  if (result.success) {
+    res.json({
+      success: true,
+      clearedCount: result.clearedCount,
+      memoryClearedCount: result.memoryClearedCount,
+      lockClearedCount: result.lockClearedCount
+    });
+  } else {
+    res.status(500).json({ success: false, error: '清理冷却失败' });
+  }
+});
+
 // Serve frontend SPA
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

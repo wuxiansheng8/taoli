@@ -863,3 +863,38 @@ input:checked + .slider:before {
 .status-table tbody tr:hover {
   background-color: rgba(255, 255, 255, 0.02);
 }
+
+/* 策略头部动作栏容器 */
+.strategy-action-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 清理冷却按钮基础样式 */
+.btn-clear-cooldown {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.165, 0.84, 0.44, 1);
+}
+
+/* 悬停态样式 */
+.btn-clear-cooldown:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.25);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(255, 255, 255, 0.05);
+}
+
+/* 禁用态（清理中） */
+.btn-clear-cooldown:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}

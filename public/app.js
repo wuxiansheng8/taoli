@@ -755,3 +755,42 @@ window.onload = () => {
     document.getElementById('login-overlay').classList.add('active');
   }
 };
+
+// 注册“清理冷却”按钮点击事件
+document.querySelectorAll('.btn-clear-cooldown').forEach(btn => {
+  btn.onclick = async () => {
+    const strategy = btn.getAttribute('data-strategy');
+    const strategyNamesMap = {
+      'new-subnet': '策略 1 (新建立子网 Staking 抢购)',
+      'rename': '策略 2 (子网改名抢跑)',
+      'coldkey-swap': '策略 3 (冷键交换声明/执行抢跑)'
+    };
+    const strategyDisplayName = strategyNamesMap[strategy] || strategy;
+    
+    // 显示浏览器自带的确认框
+    if (confirm(`确认要清理 ${strategyDisplayName} 的冷却与运行锁吗？\n\n该操作会删除 24 小时冷却、成功状态缓存，并强制释放当前策略的运行锁。\n\n请确认当前没有正在执行中的抢跑交易，否则可能导致重复买入。`)) {
+      try {
+        btn.disabled = true;
+        const origText = btn.innerText;
+        btn.innerText = '清理中...';
+        
+        // 调用封装好的 apiFetch，自动携带 Bearer Token 和 Content-Type
+        const res = await apiFetch('/api/cooldown/clear', {
+          method: 'POST',
+          body: JSON.stringify({ strategy })
+        });
+        
+        if (res && res.success) {
+          alert(`清理成功！\n- 持久化冷却: ${res.clearedCount || 0} 条\n- 内存成功状态: ${res.memoryClearedCount || 0} 条\n- 运行锁: ${res.lockClearedCount || 0} 个`);
+        } else {
+          alert('清理失败: ' + (res.error || '未知错误'));
+        }
+      } catch (e) {
+        alert('清理出错: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '清理冷却';
+      }
+    }
+  };
+});

@@ -292,6 +292,31 @@ function setCooldown(key, data) {
   }
 }
 
+function clearCooldownsByStrategy(strategyPrefix) {
+  try {
+    if (!fs.existsSync(COOLDOWNS_FILE)) return 0;
+    const cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
+    let clearedCount = 0;
+    
+    for (const key in cooldowns) {
+      if (
+        (strategyPrefix === 'new-subnet' && (key.startsWith('new-subnet:') || key.startsWith('new-subnet-double:'))) ||
+        (strategyPrefix === 'rename' && key.startsWith('rename:')) ||
+        (strategyPrefix === 'coldkey-swap' && key.startsWith('coldkey-swap:'))
+      ) {
+        delete cooldowns[key];
+        clearedCount++;
+      }
+    }
+    
+    fs.writeFileSync(COOLDOWNS_FILE, JSON.stringify(cooldowns, null, 2), 'utf8');
+    return clearedCount;
+  } catch (e) {
+    console.error('Error clearing cooldowns:', e);
+    return 0;
+  }
+}
+
 module.exports = {
   getSettings,
   saveSettings,
@@ -300,5 +325,6 @@ module.exports = {
   deleteWallet,
   hashPassword,
   getCooldown,
-  setCooldown
+  setCooldown,
+  clearCooldownsByStrategy
 };
