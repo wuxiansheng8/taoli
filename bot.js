@@ -37,6 +37,8 @@ const activeSnipesByNetuid = new Set(); // added to prevent concurrent duplicate
 
 // Subnet Owner, Hotkey & Registration Block Cache (to bypass RPC network queries during critical frontrunning path)
 const subnetOwnersCache = new Map();
+const subnetOwnerSet = new Set();
+const subnetOwnerNetuidsMap = new Map();
 const subnetHotkeysCache = new Map();
 const subnetRegisteredAtCache = new Map();
 let successfulSyncCount = 0;
@@ -205,6 +207,8 @@ async function refreshSubnetOwnersCache() {
     }
 
     subnetOwnersCache.clear();
+    subnetOwnerSet.clear();
+    subnetOwnerNetuidsMap.clear();
     subnetHotkeysCache.clear();
     subnetRegisteredAtCache.clear();
     for (let i = 0; i < activeNetuids.length; i++) {
@@ -215,6 +219,11 @@ async function refreshSubnetOwnersCache() {
       
       if (ownerStr) {
         subnetOwnersCache.set(netuid, ownerStr);
+        subnetOwnerSet.add(ownerStr);
+        if (!subnetOwnerNetuidsMap.has(ownerStr)) {
+          subnetOwnerNetuidsMap.set(ownerStr, []);
+        }
+        subnetOwnerNetuidsMap.get(ownerStr).push(netuid);
       }
       if (hotkeyStr && hotkeyStr.length >= 47) {
         subnetHotkeysCache.set(netuid, hotkeyStr);
@@ -245,10 +254,7 @@ async function refreshSubnetOwnersCache() {
 
 function isSubnetOwnerAddress(address) {
   if (!address) return false;
-  for (const owner of subnetOwnersCache.values()) {
-    if (owner === address) return true;
-  }
-  return false;
+  return subnetOwnerSet.has(address);
 }
 
 // Helper to log with Beijing Time (UTC+8)
@@ -1099,54 +1105,53 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
         let matched = false;
         let anyHotkeyResolveFailed = false;
 
-        for (const [netuid, owner] of subnetOwnersCache.entries()) {
+        const ownedNetuids = subnetOwnerNetuidsMap.get(oldColdkey) || [];
+        for (const netuid of ownedNetuids) {
           try {
-            if (owner === oldColdkey) {
-              matched = true;
-              const subActionKey = `swap:${netuid}:${oldColdkey}`;
-              if (seenActions.has(subActionKey)) continue;
+            matched = true;
+            const subActionKey = `swap:${netuid}:${oldColdkey}`;
+            if (seenActions.has(subActionKey)) continue;
 
-              const targetHotkey = await resolveHotkey(netuid);
-              if (targetHotkey) {
-                seenActions.set(subActionKey, now);
-                const isFallback = fallbackSource === 'Block-Fallback';
-                const title = isFallback ? `⚠️ <b>[区块兜底/漏扫补发 - 冷键交换抢跑]</b>` : `🚀 <b>[冷键交换抢跑 触发]</b>`;
-                const triggerBlockStr = isFallback && blockNum ? `• <b>漏扫区块</b>: <code>#${blockNum}</code>\n` : '';
-                const footer = isFallback 
-                  ? `<i>⚠️ 交易池已漏扫，正在执行区块后置补发买入...</i>` 
-                  : `<i>🔥 策略 3 开启，正在执行前置买入...</i>`;
+            const targetHotkey = await resolveHotkey(netuid);
+            if (targetHotkey) {
+              seenActions.set(subActionKey, now);
+              const isFallback = fallbackSource === 'Block-Fallback';
+              const title = isFallback ? `⚠️ <b>[区块兜底/漏扫补发 - 冷键交换抢跑]</b>` : `🚀 <b>[冷键交换抢跑 触发]</b>`;
+              const triggerBlockStr = isFallback && blockNum ? `• <b>漏扫区块</b>: <code>#${blockNum}</code>\n` : '';
+              const footer = isFallback
+                ? `<i>⚠️ 交易池已漏扫，正在执行区块后置补发买入...</i>`
+                : `<i>🔥 策略 3 开启，正在执行前置买入...</i>`;
 
-                if (settings.swapEnabled) {
-                  log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，策略 3 开启，立即执行抢跑！`);
-                  sendTelegramAlert(
-                    `${title}\n` +
-                    `━━━━━━━━━━━━━━━━━━\n` +
-                    `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
-                    `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
-                    `• <b>目标Hotkey</b>: <code>${targetHotkey}</code>\n` +
-                    triggerBlockStr +
-                    `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
-                    `━━━━━━━━━━━━━━━━━━\n` +
-                    `${footer}`
-                  );
-                  executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, '冷键交换抢跑', settings.swapSlippageLimit, { oldColdkey, detectedAt: now });
-                } else {
-                  log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，但策略 3 开关关闭，跳过买入。`);
-                  sendTelegramAlert(
-                    `⚠️ <b>[冷键交换抢跑 - 扫到交换冷键声明]</b>\n` +
-                    `━━━━━━━━━━━━━━━━━━\n` +
-                    `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
-                    `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
-                    triggerBlockStr +
-                    `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
-                    `━━━━━━━━━━━━━━━━━━\n` +
-                    `<i>⚠️ 策略 3 主开关已关闭，跳过前置买入。</i>`
-                  );
-                }
+              if (settings.swapEnabled) {
+                log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，策略 3 开启，立即执行抢跑！`);
+                sendTelegramAlert(
+                  `${title}\n` +
+                  `━━━━━━━━━━━━━━━━━━\n` +
+                  `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
+                  `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
+                  `• <b>目标Hotkey</b>: <code>${targetHotkey}</code>\n` +
+                  triggerBlockStr +
+                  `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
+                  `━━━━━━━━━━━━━━━━━━\n` +
+                  `${footer}`
+                );
+                executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, '冷键交换抢跑', settings.swapSlippageLimit, { oldColdkey, detectedAt: now });
               } else {
-                log('WARN', `[冷键交换抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
-                anyHotkeyResolveFailed = true;
+                log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，但策略 3 开关关闭，跳过买入。`);
+                sendTelegramAlert(
+                  `⚠️ <b>[冷键交换抢跑 - 扫到交换冷键声明]</b>\n` +
+                  `━━━━━━━━━━━━━━━━━━\n` +
+                  `• <b>受控子网</b>: <code>SN#${netuid}</code>\n` +
+                  `• <b>原冷键Owner</b>: <code>${oldColdkey}</code>\n` +
+                  triggerBlockStr +
+                  `• <b>触发来源</b>: <code>${fallbackSource}-扫描</code>\n` +
+                  `━━━━━━━━━━━━━━━━━━\n` +
+                  `<i>⚠️ 策略 3 主开关已关闭，跳过前置买入。</i>`
+                );
               }
+            } else {
+              log('WARN', `[冷键交换抢跑] 无法为子网 #${netuid} 解析到有效 hotkey，取消抢跑。`);
+              anyHotkeyResolveFailed = true;
             }
           } catch (e) {
             anyHotkeyResolveFailed = true;

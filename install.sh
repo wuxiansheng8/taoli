@@ -127,7 +127,6 @@ const config = {
   webPassSalt: salt,
   primaryNode: 'ws://127.0.0.1:9944',
   backupNode: 'wss://entrypoint-finney.opentensor.ai:443',
-  rateLimitPerSec: 10,
   telegramEnabled: false,
   telegramToken: '',
   telegramChatId: '',

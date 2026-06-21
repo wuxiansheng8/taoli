@@ -48,7 +48,6 @@ const DEFAULT_SETTINGS = {
   webPassSalt: defaultHashObj.salt,
   primaryNode: 'ws://127.0.0.1:9944',
   backupNode: 'wss://entrypoint-finney.opentensor.ai:443',
-  rateLimitPerSec: 10,
   mempoolPollIntervalMs: 100,
   
   telegramEnabled: false,
@@ -148,6 +147,7 @@ function getSettings() {
     delete settings.dashingTip;
     delete settings.renameTip;
     delete settings.swapTip;
+    delete settings.rateLimitPerSec;
     return { ...DEFAULT_SETTINGS, ...settings };
   } catch (e) {
     console.error('Error reading settings file, using defaults:', e);
