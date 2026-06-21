@@ -30,6 +30,7 @@ let lastTtlCleanupTime = 0; // 新增：用于限制 TTL 内存清理频率
 const seenHashes = new Map();
 const seenActions = new Map();
 const nextNonceByAddress = new Map();
+const inFlightNonces = new Map();
 const balanceByAddress = new Map();
 const processedNetuids = new Map();
 const dashingSuccessByNetuid = new Map(); // added for tracking successful snipes
@@ -378,7 +379,7 @@ function testApiUrl(url) {
 }
 
 // Fetch balances and nonces for all wallets
-async function refreshWalletState(address) {
+async function refreshWalletState(address, nonceForwardOnly = false) {
   if (!api || !api.isConnected) return;
   try {
     const account = await api.query.system.account(address);
@@ -387,9 +388,13 @@ async function refreshWalletState(address) {
     
     const nonce = await api.rpc.system.accountNextIndex(address);
     const nextNonce = Number(nonce.toString());
-    
+
     balanceByAddress.set(address, { freeTao, updatedAt: new Date(Date.now() + 8 * 3600000).toISOString() });
-    nextNonceByAddress.set(address, nextNonce);
+    if (nonceForwardOnly) {
+      setNonceForwardOnly(address, nextNonce);
+    } else {
+      nextNonceByAddress.set(address, nextNonce);
+    }
   } catch (e) {
     log('WARN', `刷新钱包 ${address.slice(-6)} 状态失败: ${e.message}`);
   }
@@ -477,11 +482,36 @@ function getWalletsStatus() {
 }
 
 // Local Nonce management
+function setNonceForwardOnly(address, nextNonce) {
+  if (nextNonce === undefined || isNaN(nextNonce)) return;
+  const currentNonce = nextNonceByAddress.get(address);
+  if (currentNonce === undefined || isNaN(currentNonce) || nextNonce > currentNonce) {
+    nextNonceByAddress.set(address, nextNonce);
+  }
+}
+
+async function refreshNonceForwardOnly(address) {
+  if (!api || !api.isConnected) return;
+  try {
+    const nonce = await api.rpc.system.accountNextIndex(address);
+    setNonceForwardOnly(address, Number(nonce.toString()));
+  } catch (e) {}
+}
+
 function reserveNonce(address) {
   const nextNonce = nextNonceByAddress.get(address);
   if (nextNonce === undefined || isNaN(nextNonce)) return null;
   nextNonceByAddress.set(address, nextNonce + 1);
+  if (!inFlightNonces.has(address)) inFlightNonces.set(address, new Set());
+  inFlightNonces.get(address).add(nextNonce);
   return nextNonce;
+}
+
+function releaseNonce(address, nonce) {
+  const set = inFlightNonces.get(address);
+  if (!set) return;
+  set.delete(nonce);
+  if (set.size === 0) inFlightNonces.delete(address);
 }
 
 // 低层：轻量级 Extrinsic 签名与广播（纯事务发送器）
@@ -515,15 +545,14 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
     const finish = (result) => {
       if (settled) return;
       settled = true;
+      releaseNonce(address, reservedNonce);
       clearTimeout(timeout);
       if (typeof unsubscribe === 'function') unsubscribe();
       resolve(result);
     };
 
     const timeout = setTimeout(() => {
-      api.rpc.system.accountNextIndex(address)
-        .then(n => nextNonceByAddress.set(address, Number(n.toString())))
-        .catch(() => {});
+      refreshNonceForwardOnly(address);
       finish({ success: false, error: 'Transaction timeout' });
     }, txTimeoutMs);
 
@@ -540,7 +569,7 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
 
       tx.send(({ status, events, dispatchError }) => {
         if (status.isInBlock || status.isFinalized) {
-          refreshWalletState(address).catch(() => {});
+          refreshWalletState(address, true).catch(() => {});
           if (dispatchError) {
             let errorInfo = dispatchError.toString();
             if (dispatchError.isModule) {
@@ -575,24 +604,18 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
             });
           }
         } else if (status.isError) {
-          api.rpc.system.accountNextIndex(address)
-            .then(n => nextNonceByAddress.set(address, Number(n.toString())))
-            .catch(() => {});
+          refreshNonceForwardOnly(address);
           finish({ success: false, error: 'Chain transaction error' });
         }
       }).then((unsub) => {
         if (settled && typeof unsub === 'function') unsub();
         else unsubscribe = unsub;
       }).catch(error => {
-        api.rpc.system.accountNextIndex(address)
-          .then(n => nextNonceByAddress.set(address, Number(n.toString())))
-          .catch(() => {});
+        refreshNonceForwardOnly(address);
         finish({ success: false, error: error.message });
       });
     } catch (err) {
-      api.rpc.system.accountNextIndex(address)
-        .then(n => nextNonceByAddress.set(address, Number(n.toString())))
-        .catch(() => {});
+      refreshNonceForwardOnly(address);
       finish({ success: false, error: `Signing failed: ${err.message}` });
     }
   });
