@@ -152,36 +152,6 @@ function broadcastSignedTx(signedTxHex) {
   }
 }
 
-async function calculateDynamicSlippage(netuid, victimAmountTao) {
-  try {
-    const settings = database.getSettings();
-    if (!settings.dynamicSlippageEnabled) {
-      return settings.sandwichSlippageLimit || 0.05;
-    }
-
-    // 直接从链上精确存储 subnetTAO 获取储备金 (RAO)，转换为 TAO
-    const subnetTao = await api.query.subtensorModule.subnetTAO(netuid);
-    if (!subnetTao) return settings.sandwichSlippageLimit || 0.05;
-    const T = Number(subnetTao.toString()) / 1e9;
-    if (T <= 0) return settings.sandwichSlippageLimit || 0.05;
-
-    // 使用在同一个单位 (TAO) 下的 V 和 T 进行计算
-    const priceRatio = Math.pow(1.0 + victimAmountTao / T, 2);
-    const expectedRise = priceRatio - 1.0;
-    
-    const safetyFactor = settings.dynamicSlippageSafetyFactor || 0.7;
-    const dynamicSlippage = expectedRise * safetyFactor;
-    
-    log('INFO', `[动态滑点] 子网 #${netuid} 链上精确储备金: ${T.toFixed(4)} TAO, 受害者交易: ${victimAmountTao} TAO, 预测价格涨幅: ${(expectedRise * 100).toFixed(2)}%, 设定动态滑点: ${(dynamicSlippage * 100).toFixed(2)}%`);
-    
-    return Math.max(0.01, Math.min(0.50, dynamicSlippage));
-  } catch (err) {
-    log('WARN', `[动态滑点] 计算异常: ${err.message}，回退使用固定滑点。`);
-    const settings = database.getSettings();
-    return settings.sandwichSlippageLimit || 0.05;
-  }
-}
-
 async function refreshSubnetOwnersCache() {
   if (!api || !api.isConnected) return;
   try {
@@ -509,7 +479,7 @@ function reserveNonce(address) {
 }
 
 // 低层：轻量级 Extrinsic 签名与广播（纯事务发送器）
-async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta = null) {
+async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) {
   return new Promise(async (resolve) => {
     let unsubscribe = null;
     let settled = false;
@@ -525,7 +495,6 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
     // 准备签名选项
     const options = {};
     options.nonce = reservedNonce;
-    if (tip > 0) options.tip = BigInt(Math.floor(tip * 1e9));
 
     // 统一设置明文交易为 Mortal Era (生命周期为 8 个区块，约 96 秒)
     // 保护明文打新交易：若 20-30 秒内未能挤进前几个区块打包，则交易自动作废，防止后期滞后打包导致高价套牢
@@ -559,7 +528,7 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
 
       const callDetails = `${tx.method.section}.${tx.method.method}`;
       const latencyStr = (meta && meta.detectedAt) ? ` | 距交易池触发: ${Date.now() - meta.detectedAt}ms` : '';
-      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | Tip: ${tip} TAO | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
+      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
 
       broadcastSignedTx(signedTxHex);
 
@@ -624,8 +593,8 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, tip = 0, nonce = null, meta
 }
 
 // 路由器层：策略路由分配器
-async function sendStrategicTx(tx, pair, txTimeoutMs = 15000, tip = 0, meta = null) {
-  const res = await sendTx(tx, pair, txTimeoutMs, tip, null, meta);
+async function sendStrategicTx(tx, pair, txTimeoutMs = 15000, meta = null) {
+  const res = await sendTx(tx, pair, txTimeoutMs, null, meta);
   if (res.success) {
     return {
       success: true,
@@ -866,29 +835,8 @@ async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit, maxPric
   return api.tx.subtensorModule.addStake(hotkey, netuid, amountBigInt);
 }
 
-// Build removeStake or removeStakeLimit based on metadata compatibility
-async function buildUnstakeTx(hotkey, netuid, amountBigInt, slippageLimit) {
-  const hasLimitCall = typeof api.tx.subtensorModule.removeStakeLimit === 'function';
-  if (hasLimitCall && slippageLimit !== undefined) {
-    const currentPrice = await getSubnetPrice(netuid);
-    if (currentPrice !== null) {
-      const settings = database.getSettings();
-      const slippageMultiplier = 1.0 - parseFloat(slippageLimit);
-      const limitPrice = BigInt(Math.floor(Number(currentPrice) * slippageMultiplier));
-      const allowPartial = settings.allowPartialStaking !== false;
-      
-      log('INFO', `[限价保护] 启用 removeStakeLimit -> 当前价格: ${(Number(currentPrice) / 1e9).toFixed(4)} TAO/Alpha, 最低限价: ${(Number(limitPrice) / 1e9).toFixed(4)} TAO/Alpha, 允许部分成交: ${allowPartial}`);
-      return api.tx.subtensorModule.removeStakeLimit(hotkey, netuid, amountBigInt, limitPrice, allowPartial);
-    }
-  }
-  return api.tx.subtensorModule.removeStake(hotkey, netuid, amountBigInt);
-}
-
-
-
 // Strategy triggers and pending states
 const doubleStakingRegistered = new Set(); // 严格控制每个 netuid 仅注册一个二次定时器
-let pendingSandwichSell = null;
 
 // Core extrinsic execution triggers
 async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockNum = null) {
@@ -1101,7 +1049,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
               `━━━━━━━━━━━━━━━━━━\n` +
               `${footer}`
             );
-            executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, settings.renameTip, '改名抢跑', settings.renameSlippageLimit, { cleanName, detectedAt: now });
+            executeArbitrageStake(netuid, targetHotkey, settings.renameAmount, '改名抢跑', settings.renameSlippageLimit, { cleanName, detectedAt: now });
           } else {
             log('INFO', `[改名抢跑] [${fallbackSource}] 扫到子网 #${netuid} 提交改名交易 -> "${cleanName}"。但策略 2 开关关闭，跳过买入。`);
             sendTelegramAlert(
@@ -1181,7 +1129,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                     `━━━━━━━━━━━━━━━━━━\n` +
                     `${footer}`
                   );
-                  executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, settings.swapTip, '冷键交换抢跑', settings.swapSlippageLimit, { oldColdkey, detectedAt: now });
+                  executeArbitrageStake(netuid, targetHotkey, settings.swapAmount, '冷键交换抢跑', settings.swapSlippageLimit, { oldColdkey, detectedAt: now });
                 } else {
                   log('INFO', `[冷键交换抢跑] [${fallbackSource}] 匹配到目标受控子网 #${netuid}，但策略 3 开关关闭，跳过买入。`);
                   sendTelegramAlert(
@@ -1220,118 +1168,6 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
       }
     } catch (e) {
       log('ERROR', `处理冷键交换抢跑判断错误: ${e.message}`);
-      return false;
-    }
-  }
-
-  // 4. addStake / addStakeLimit -> 大额买入三明治套利（彻底排除 swapStake 干扰）
-  if (/^(add(_)?stake|add(_)?stake(_)?limit)$/i.test(normalizedCall)) {
-    if (!settings.sandwichEnabled) return true;
-    try {
-      let netuid = null;
-      let hotkey = null;
-      let amountRao = 0n;
-      let isBuy = false;
-
-      if (/^add(_)?stake/i.test(normalizedCall)) {
-        hotkey = args.hotkey?.toString() || args[0]?.toString();
-        netuid = Number(args.netuid?.toString() || args[1]?.toString());
-        amountRao = BigInt(
-          args.amountStaked?.toString() || 
-          args.amount_staked?.toString() || 
-          args.stake_to_be_added?.toString() || 
-          args.amount?.toString() || 
-          args[2]?.toString() || 
-          '0'
-        );
-        isBuy = true;
-      }
-
-      if (isBuy && netuid !== null && hotkey) {
-        if (!Number.isFinite(netuid) || netuid <= 0) return true; // 严格过滤无效子网和子网 0
-        const amountTao = Number(amountRao) / 1e9;
-        if (amountTao >= settings.sandwichThreshold) {
-          const actionKey = `sandwich:${txHash}`;
-          if (seenActions.has(actionKey)) return true;
-
-          // 核心验证：过滤虚假/无效交易（无 nonce/signer 则保守跳过）
-          if (!signer || signer === 'unsigned' || parsed.nonce === null) {
-            log('INFO', `[三明治套利] 过滤无法解析 signer 或 nonce 的交易: Hash: ${txHash}, Signer: ${signer}, Nonce: ${parsed.nonce}`);
-            return true;
-          }
-
-          try {
-            const accountInfo = await api.query.system.account(signer);
-            const nextNonce = accountInfo.nonce.toNumber();
-            
-            // 严格要求 nonce 必须等于 nextNonce，过滤过期或未来 nonce 交易，确保紧挨着夹人
-            if (parsed.nonce !== nextNonce) {
-              log('INFO', `[三明治套利] 过滤 Nonce 不匹配 the交易 (未来或过期): Hash: ${txHash}, Signer: ${signer}, TxNonce: ${parsed.nonce}, ChainNonce: ${nextNonce}`);
-              return true;
-            }
-            
-            const freeBalance = BigInt(accountInfo.data.free.toString());
-            if (freeBalance < amountRao) {
-              log('WARN', `[三明治套利] 过滤余额不足的虚假买入交易: Hash: ${txHash}, Signer: ${signer}, 余额: ${(Number(freeBalance) / 1e9).toFixed(2)} TAO, 需质押: ${(Number(amountRao) / 1e9).toFixed(2)} TAO`);
-              return true;
-            }
-          } catch (err) {
-            log('WARN', `[三明治套利] 验证交易有效性时发生异常: ${err.message}，放弃本次套利。`);
-            return true; // 验证失败保守跳过，确保安全
-          }
-
-          seenActions.set(actionKey, now);
-
-          log('WARN', `[三明治套利] 扫到大额买入交易 (金额: ${amountTao.toFixed(2)} TAO, 子网 #${netuid}, 目标 Hotkey: ${hotkey}, 夹人地址: ${signer}) (Hash: ${txHash})！`);
-          sendTelegramAlert(`🚨 [三明治套利触发]\n检测到大额买入交易！\n金额: ${amountTao.toFixed(2)} TAO\n子网: #${netuid}\n目标 Hotkey: ${hotkey}\n发送者: ${signer}\n正在执行前置抢跑买入...`);
-
-          // Calculate dynamic slippage
-          let calculatedSlippage;
-          try {
-            calculatedSlippage = await calculateDynamicSlippage(netuid, amountTao);
-          } catch (e) {
-            log('WARN', `[三明治套利] 计算动态滑点失败: ${e.message}。使用默认滑点 0.05`);
-            calculatedSlippage = 0.05;
-          }
-          
-          if (settings.dynamicSlippageEnabled) {
-            const safetyFactor = settings.dynamicSlippageSafetyFactor || 0.7;
-            const expectedRise = calculatedSlippage / safetyFactor;
-            if (expectedRise < 0.015) {
-              log('INFO', `[三明治套利] 子网 #${netuid} 预测价格涨幅 ${(expectedRise * 100).toFixed(2)}% 过低，无法覆盖套利小费，放弃本次套利。`);
-              return true;
-            }
-          }
-
-          const targetHotkey = await resolveHotkey(netuid);
-          if (!targetHotkey) {
-            log('WARN', `[三明治套利] 全局默认 Hotkey 未配置，跳过前置买入。`);
-            return true;
-          }
-          const buySuccess = await executeSandwichBuy(netuid, targetHotkey, settings.sandwichAmount, settings.sandwichTip, calculatedSlippage);
-          if (buySuccess) {
-            if (settings.sandwichAutoSell) {
-              log('INFO', `[三明治套利] 成功执行前置买入，已登记后置卖出，将在下一个区块头确认时自动发起售出...`);
-              pendingSandwichSell = {
-                netuid,
-                hotkey: targetHotkey,
-                amount: settings.sandwichAmount,
-                tip: settings.sandwichSellTip
-              };
-            }
-            return true;
-          } else {
-            log('WARN', `[三明治套利] 执行前置买入失败，本次套利取消。`);
-            return false;
-          }
-        } else {
-          return true;
-        }
-      } else {
-        return false;
-      }
-    } catch (e) {
-      log('ERROR', `处理大额买入抢跑判断错误: ${e.message}`);
       return false;
     }
   }
@@ -1573,8 +1409,7 @@ async function resolveHotkey(netuid, force = false) {
 }
 
 // Execute normal staking arbitrage
-// Execute normal staking arbitrage
-async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slippageLimit, extraParams = null) {
+async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageLimit, extraParams = null) {
   const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
   if (activeWallets.length === 0) {
@@ -1666,7 +1501,6 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
     dashingSuccessByNetuid.set(successKey, false);
   }
 
-  const targetTip = tip;
   log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
   
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
@@ -1687,7 +1521,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
             const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
             log('INFO', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
 
-            const p = sendStrategicTx(tx, w.pair, timeoutMs, targetTip, {
+            const p = sendStrategicTx(tx, w.pair, timeoutMs, {
               netuid,
               hotkey,
               amountBigInt,
@@ -1716,7 +1550,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
               } else {
                 log('ERROR', `[${label} 失败] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && timeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, hotkey, 1, timeoutRetries, timeoutMs, amountTao, slippageLimit, null, tip, label);
+                  return executeTimeoutRetry(w, netuid, hotkey, 1, timeoutRetries, timeoutMs, amountTao, slippageLimit, null, label);
                 }
                 return res;
               }
@@ -1746,149 +1580,6 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, tip, label, slip
   }
 }
 
-// Helper to query Alpha balance from chain and log the raw value
-async function queryAlphaBalance(hotkey, coldkey, netuid) {
-  if (!api.query.subtensorModule.alpha) {
-    log('WARN', `[余额查询] api.query.subtensorModule.alpha 不存在，尝试使用旧版本 stake 查询`);
-    if (api.query.subtensorModule.stake) {
-      const stakeVal = await api.query.subtensorModule.stake(hotkey, coldkey);
-      log('INFO', `[余额查询] stake (旧版本) 查询结果 raw: ${stakeVal.toString()}`);
-      return BigInt(stakeVal.toString());
-    }
-    return 0n;
-  }
-  
-  const alphaVal = await api.query.subtensorModule.alpha(hotkey, coldkey, netuid);
-  const alphaRao = BigInt(alphaVal.toString());
-  log('INFO', `[余额查询] alpha 查询结果 raw (Rao): ${alphaRao.toString()} (Hotkey: ${hotkey.slice(-6)}, Coldkey: ${coldkey.slice(-6)}, Netuid: ${netuid})`);
-  return alphaRao;
-}
-
-// Sandwich Buy (Frontrun)
-async function executeSandwichBuy(netuid, hotkey, amountTao, tip, slippageLimit) {
-  const settings = database.getSettings();
-  const activeWallets = wallets.filter(w => w.enabled !== false);
-  if (activeWallets.length === 0) return false;
-  
-  const w = activeWallets[0];
-  const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
-  const targetTip = tip;
-  
-  try {
-    const tx = await buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit);
-    log('INFO', `[三明治套利] 发起前置抢跑买入 -> 钱包: ${w.name}, 小费: ${targetTip} TAO (明文发送)`);
-    const res = await sendStrategicTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip, {
-      netuid,
-      hotkey,
-      amountBigInt,
-      slippageLimit,
-      label: '三明治套利买入',
-      detectedAt: Date.now()
-    });
-    if (res.success) {
-      log('SUCCESS', `[三明治套利] 前置买入成功！交易哈希: ${res.hash}`);
-      return true;
-    } else {
-      log('ERROR', `[三明治套利] 前置买入失败: ${res.error}`);
-      sendTelegramAlert(
-        `❌ <b>[三明治套利 失败]</b>\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
-        `• <b>阶段</b>: <code>前置买入 (Frontrun Buy)</code>\n` +
-        `• <b>失败原因</b>: <code>${escapeHtml(res.error)}</code>\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `<i>⚠️ 套利终止。</i>`
-      );
-      return false;
-    }
-  } catch (e) {
-    log('ERROR', `[三明治套利] 前置买入异常: ${e.message}`);
-    return false;
-  }
-}
-
-// Sandwich Sell (Backrun)
-async function executeSandwichSell(netuid, hotkey, amountTao, tip) {
-  const settings = database.getSettings();
-  const activeWallets = wallets.filter(w => w.enabled !== false);
-  if (activeWallets.length === 0) return;
-  
-  const w = activeWallets[0];
-  const targetTip = tip;
-  
-  // Query actual Alpha stake balance of the wallet on the subnet
-  let stakeRao = 0n;
-  try {
-    log('INFO', `[三明治套利] 正在查询钱包【${w.name}】在子网 #${netuid} 的实际 Alpha 质押余额...`);
-    for (let attempt = 0; attempt < 5; attempt++) {
-      stakeRao = await queryAlphaBalance(hotkey, w.pair.address, netuid);
-      if (stakeRao > 0n) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
-    }
-  } catch (err) {
-    log('WARN', `[三明治套利] 查询 stake 余额异常: ${err.message}`);
-  }
-
-  if (stakeRao === 0n) {
-    log('ERROR', `[三明治套利] 未查询到实际 Alpha 质押余额，放弃盲目卖出以防损失！请手动查账！`);
-    sendTelegramAlert(
-      `❌ <b>[三明治套利 异常]</b>\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
-      `• <b>阶段</b>: <code>余额确认 (Alpha Balance Query)</code>\n` +
-      `• <b>当前状态</b>: <code>前置买入已成功，但无法查询到质押余额！</code>\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
-      `<i>⚠️ 警告：后置自动卖出已终止。请立即手动查账处理以防资产损失！</i>`
-    );
-    return;
-  } else {
-    log('INFO', `[三明治套利] 成功获取到实际 Alpha 质押余额: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha`);
-  }
-  
-  try {
-    const tx = await buildUnstakeTx(hotkey, netuid, stakeRao, settings.sandwichSlippageLimit);
-    log('INFO', `[三明治套利] 发起后置卖出 -> 钱包: ${w.name}, 数量: ${(Number(stakeRao) / 1e9).toFixed(4)} Alpha, 小费: ${targetTip} TAO`);
-    const res = await sendStrategicTx(tx, w.pair, settings.sandwichTimeoutMs || 18000, targetTip, {
-      netuid,
-      hotkey,
-      label: '三明治套利卖出',
-      detectedAt: Date.now()
-    });
-    if (res.success) {
-      log('SUCCESS', `[三明治套利] 后置卖出回补成功！套利完成！交易哈希: ${res.hash}`);
-      const blockStr = res.blockNumber ? `• <b>成交区块</b>: <code>#${res.blockNumber}</code>\n` : '';
-      const idxStr = (res.txIndex !== null && res.txIndex !== undefined) ? `• <b>排队位置</b>: <code>第 ${res.txIndex} 笔交易</code>\n` : '';
-      sendTelegramAlert(
-        `🎉 <b>[三明治套利 成功完成]</b>\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `• <b>操作钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
-        `• <b>套利子网</b>: <code>SN#${netuid}</code>\n` +
-        blockStr +
-        idxStr +
-        `• <b>卖出数量</b>: <code>${(Number(stakeRao) / 1e9).toFixed(4)} Alpha</code>\n` +
-        `• <b>卖出哈希</b>: <code>${res.hash}</code>\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `<i>🎉 三明治套利动作已全部顺利闭环！</i>`
-      );
-    } else {
-      log('ERROR', `[三明治套利] 后置卖出失败: ${res.error}`);
-      const blockStr = res.blockNumber ? `• <b>成交区块</b>: <code>#${res.blockNumber}</code>\n` : '';
-      const idxStr = (res.txIndex !== null && res.txIndex !== undefined) ? `• <b>排队位置</b>: <code>第 ${res.txIndex} 笔交易</code> (卖出失败)\n` : '';
-      sendTelegramAlert(
-        `❌ <b>[三明治套利 严重异常]</b>\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `• <b>使用钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
-        blockStr +
-        idxStr +
-        `• <b>失败原因</b>: <code>${escapeHtml(res.error)}</code>\n` +
-        `━━━━━━━━━━━━━━━━━━\n` +
-        `<i>⚠️ 警告：前置买入已成交，但后置卖出失败！请立即手动在钱包中抛售 Alpha 份额！</i>`
-      );
-    }
-  } catch (e) {
-    log('ERROR', `[三明治套利] 后置卖出异常: ${e.message}`);
-  }
-}
-
 // Helper for timeout retries
 async function executeTimeoutRetry(
   w,
@@ -1900,7 +1591,6 @@ async function executeTimeoutRetry(
   customAmount = null,
   customSlippageLimit = null,
   customMaxPriceLimit = null,
-  customTip = null,
   label = '新子网打新',
   successfulSnipes = null
 ) {
@@ -1934,7 +1624,6 @@ async function executeTimeoutRetry(
   
   const actualAmount = customAmount !== null ? customAmount : settings.dashingAmount;
   const actualSlippageLimit = customSlippageLimit !== null ? customSlippageLimit : settings.dashingSlippageLimit;
-  const actualTip = customTip !== null ? customTip : settings.dashingTip;
   const actualTimeoutMs = customTimeoutMs !== null ? customTimeoutMs : (settings.dashingTimeoutMs || 30000);
   
   // 确认 maxPriceLimit 的来源（支持参数传入或使用 settings 对应策略通道的默认配置）
@@ -1944,14 +1633,13 @@ async function executeTimeoutRetry(
     : (isDoubleStaking ? Number(settings.dashingDoubleMaxPrice || 0) : Number(settings.dashingMaxPrice || 0));
   
   try {
-    const targetTip = actualTip;
     const amountBigInt = BigInt(Math.floor(actualAmount * 1e9));
     
     // 调用 buildStakeTx，传入 actualMaxPriceLimit，由于重试没有缓存在 round 里的价格，传入 null 让其自动 RPC 获取最新价格
     const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit, actualMaxPriceLimit, null);
     
     const p = new Promise((resolve) => {
-      sendStrategicTx(tx, w.pair, actualTimeoutMs, targetTip, {
+      sendStrategicTx(tx, w.pair, actualTimeoutMs, {
         netuid,
         hotkey: targetHotkey,
         amountBigInt,
@@ -1989,7 +1677,7 @@ async function executeTimeoutRetry(
         } else {
           log('ERROR', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】交易失败: ${res.error}`);
           if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout'))) {
-            executeTimeoutRetry(w, netuid, targetHotkey, attemptNum + 1, actualMaxRetries, actualTimeoutMs, actualAmount, actualSlippageLimit, actualMaxPriceLimit, actualTip, label, successfulSnipes).then(resolve);
+            executeTimeoutRetry(w, netuid, targetHotkey, attemptNum + 1, actualMaxRetries, actualTimeoutMs, actualAmount, actualSlippageLimit, actualMaxPriceLimit, label, successfulSnipes).then(resolve);
           } else {
             resolve(res);
           }
@@ -2106,7 +1794,6 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   const txPromises = [];
   let stoppedByPriceLimit = false;
 
-  const targetTip = settings.dashingTip;
   const burstCount = Math.max(1, settings.dashingBurstCount || 1);
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
@@ -2157,7 +1844,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
             log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
-            const p = sendStrategicTx(tx, w.pair, settings.dashingTimeoutMs, targetTip, {
+            const p = sendStrategicTx(tx, w.pair, settings.dashingTimeoutMs, {
               netuid,
               hotkey: targetHotkey,
               amountBigInt,
@@ -2174,7 +1861,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               } else {
                 log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, slippageLimit, maxPriceLimit, settings.dashingTip, retryLabel);
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, settings.dashingAmount, slippageLimit, maxPriceLimit, retryLabel);
                 }
                 return res;
               }
@@ -2270,8 +1957,9 @@ function handleDoubleStaking(netuid, hotkey, source, detectedAt = null) {
 
 // 100% 独立链上自愈检测：检测是否有新注册/被接管回收的子网，并执行兜底抢单
 async function detectNewSubnetOnChain(blockHeight) {
-  if (!api || !api.isConnected) return;
+  if (!api || !api.isConnected) return false;
   try {
+    let detected = false;
     // 1. 从缓存中获取已知的子网列表
     const cachedNetuids = Array.from(subnetRegisteredAtCache.keys());
     
@@ -2313,10 +2001,13 @@ async function detectNewSubnetOnChain(blockHeight) {
                          `<i>⚠️ 交易池未扫到该注册，已通过区块扫描自愈！正在监听该子网的 startCall 以备抢跑！</i>`;
         log('SUCCESS', `[区块确认 - 新子网已上链] 检测到新子网已在区块 #${blockHeight} 确认注册！新子网为: SN#${netuid}`);
         sendTelegramAlert(alertMsg).catch(() => {});
+        detected = true;
       }
     }
+    return detected;
   } catch (e) {
     log('ERROR', `[新子网打新] 链上自愈检测发生异常: ${e.message}`);
+    return false;
   }
 }
 
@@ -2383,7 +2074,7 @@ async function poll() {
         }
 
         if (/^subtensor(Module)?$/i.test(parsed.section) && 
-            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|addStake|addStakeLimit|add_stake|add_stake_limit|startCall|start_call)$/i.test(parsed.callName)) {
+            /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|startCall|start_call)$/i.test(parsed.callName)) {
           const handled = await handlePendingExtrinsic(parsed, 'Mempool');
           seenHashes.set(parsed.txHash, {
             timestamp: now,
@@ -2658,12 +2349,6 @@ async function connectWs(reason = 'Normal Boot') {
         }
       }
 
-      if (pendingSandwichSell) {
-        const sell = pendingSandwichSell;
-        pendingSandwichSell = null;
-        log('INFO', `[三明治套利] 检测到新区块 #${currentBlockHeight}，自动执行后置售出！`);
-        await executeSandwichSell(sell.netuid, sell.hotkey, sell.amount, sell.tip);
-      }
     });
 
     // 只抬下限为 50ms，不设上限，允许用户手动降压放慢扫描速度

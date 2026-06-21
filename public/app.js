@@ -308,7 +308,6 @@ async function loadConfig() {
     document.getElementById('strat-dashing-interval').value = cfg.dashingIntervalMs;
     document.getElementById('strat-dashing-timeout').value = cfg.dashingTimeoutMs;
     document.getElementById('strat-dashing-timeout-retries').value = cfg.dashingTimeoutRetries !== undefined ? cfg.dashingTimeoutRetries : 0;
-    document.getElementById('strat-dashing-tip').value = cfg.dashingTip;
     document.getElementById('strat-dashing-double-delay').value = cfg.dashingDoubleStakingDelay !== undefined ? cfg.dashingDoubleStakingDelay : '';
     document.getElementById('strat-dashing-double-slippage').value = cfg.dashingDoubleSlippageLimit !== undefined ? cfg.dashingDoubleSlippageLimit : '';
     document.getElementById('strat-dashing-max-price').value = cfg.dashingMaxPrice !== undefined ? cfg.dashingMaxPrice : '';
@@ -316,7 +315,6 @@ async function loadConfig() {
     
     document.getElementById('strat-rename-enabled').checked = cfg.renameEnabled;
     document.getElementById('strat-rename-amount').value = cfg.renameAmount !== undefined ? cfg.renameAmount : 100;
-    document.getElementById('strat-rename-tip').value = cfg.renameTip;
     document.getElementById('strat-rename-burst').value = cfg.renameBurstCount !== undefined ? cfg.renameBurstCount : 1;
     document.getElementById('strat-rename-retries').value = cfg.renameRetries !== undefined ? cfg.renameRetries : 1;
     document.getElementById('strat-rename-interval').value = cfg.renameIntervalMs !== undefined ? cfg.renameIntervalMs : 1000;
@@ -325,19 +323,11 @@ async function loadConfig() {
     
     document.getElementById('strat-swap-enabled').checked = cfg.swapEnabled;
     document.getElementById('strat-swap-amount').value = cfg.swapAmount !== undefined ? cfg.swapAmount : 100;
-    document.getElementById('strat-swap-tip').value = cfg.swapTip;
     document.getElementById('strat-swap-burst').value = cfg.swapBurstCount !== undefined ? cfg.swapBurstCount : 1;
     document.getElementById('strat-swap-retries').value = cfg.swapRetries !== undefined ? cfg.swapRetries : 1;
     document.getElementById('strat-swap-interval').value = cfg.swapIntervalMs !== undefined ? cfg.swapIntervalMs : 1000;
     document.getElementById('strat-swap-timeout').value = cfg.swapTimeoutMs !== undefined ? cfg.swapTimeoutMs : 30000;
     document.getElementById('strat-swap-timeout-retries').value = cfg.swapTimeoutRetries !== undefined ? cfg.swapTimeoutRetries : 0;
-    
-    document.getElementById('strat-sandwich-enabled').checked = cfg.sandwichEnabled;
-    document.getElementById('strat-sandwich-threshold').value = cfg.sandwichThreshold;
-    document.getElementById('strat-sandwich-amount').value = cfg.sandwichAmount !== undefined ? cfg.sandwichAmount : 100;
-    document.getElementById('strat-sandwich-tip').value = cfg.sandwichTip;
-    document.getElementById('strat-sandwich-sell-tip').value = cfg.sandwichSellTip;
-    document.getElementById('strat-sandwich-autosell').checked = cfg.sandwichAutoSell;
     
     // Global Default Hotkey
     document.getElementById('cfg-default-hotkey').value = cfg.defaultHotkey || '';
@@ -346,14 +336,9 @@ async function loadConfig() {
     document.getElementById('strat-dashing-slippage').value = cfg.dashingSlippageLimit !== undefined ? cfg.dashingSlippageLimit : '';
     document.getElementById('strat-rename-slippage').value = cfg.renameSlippageLimit !== undefined ? cfg.renameSlippageLimit : '';
     document.getElementById('strat-swap-slippage').value = cfg.swapSlippageLimit !== undefined ? cfg.swapSlippageLimit : '';
-    document.getElementById('strat-sandwich-slippage').value = cfg.sandwichSlippageLimit !== undefined ? cfg.sandwichSlippageLimit : '';
     
     // Advanced Bidding and Limit controls
     document.getElementById('cfg-allow-partial-staking').checked = cfg.allowPartialStaking !== false;
-
-    // AMM Dynamic Slippage
-    document.getElementById('cfg-dynamic-slippage-enabled').checked = !!cfg.dynamicSlippageEnabled;
-    document.getElementById('cfg-dynamic-slippage-safety-factor').value = cfg.dynamicSlippageSafetyFactor !== undefined ? cfg.dynamicSlippageSafetyFactor : '';
 
     // Broadcast Nodes
     if (Array.isArray(cfg.broadcastNodes)) {
@@ -393,14 +378,12 @@ async function saveStrategies() {
     dashingIntervalMs: Number(document.getElementById('strat-dashing-interval').value),
     dashingTimeoutMs: Number(document.getElementById('strat-dashing-timeout').value),
     dashingTimeoutRetries: Number(document.getElementById('strat-dashing-timeout-retries').value || 0),
-    dashingTip: Number(document.getElementById('strat-dashing-tip').value),
     dashingDoubleStakingDelay: doubleDelay,
     dashingDoubleSlippageLimit: dashingDoubleSlippage,
     dashingDoubleMaxPrice: dashingDoubleMaxPrice,
     
     renameEnabled: document.getElementById('strat-rename-enabled').checked,
     renameAmount: Number(document.getElementById('strat-rename-amount').value || 100),
-    renameTip: Number(document.getElementById('strat-rename-tip').value),
     renameBurstCount: Number(document.getElementById('strat-rename-burst').value || 1),
     renameRetries: Number(document.getElementById('strat-rename-retries').value || 1),
     renameIntervalMs: Number(document.getElementById('strat-rename-interval').value || 1000),
@@ -409,33 +392,20 @@ async function saveStrategies() {
     
     swapEnabled: document.getElementById('strat-swap-enabled').checked,
     swapAmount: Number(document.getElementById('strat-swap-amount').value || 100),
-    swapTip: Number(document.getElementById('strat-swap-tip').value),
     swapBurstCount: Number(document.getElementById('strat-swap-burst').value || 1),
     swapRetries: Number(document.getElementById('strat-swap-retries').value || 1),
     swapIntervalMs: Number(document.getElementById('strat-swap-interval').value || 1000),
     swapTimeoutMs: Number(document.getElementById('strat-swap-timeout').value || 30000),
     swapTimeoutRetries: Number(document.getElementById('strat-swap-timeout-retries').value || 0),
     
-    sandwichEnabled: document.getElementById('strat-sandwich-enabled').checked,
-    sandwichThreshold: Number(document.getElementById('strat-sandwich-threshold').value),
-    sandwichAmount: Number(document.getElementById('strat-sandwich-amount').value || 100),
-    sandwichTip: Number(document.getElementById('strat-sandwich-tip').value),
-    sandwichSellTip: Number(document.getElementById('strat-sandwich-sell-tip').value),
-    sandwichAutoSell: document.getElementById('strat-sandwich-autosell').checked,
-    
     // Slippage Limits
     dashingSlippageLimit: dashingSlippage,
     dashingMaxPrice: dashingMaxPrice,
     renameSlippageLimit: document.getElementById('strat-rename-slippage').value !== '' ? Number(document.getElementById('strat-rename-slippage').value) : 0.05,
     swapSlippageLimit: document.getElementById('strat-swap-slippage').value !== '' ? Number(document.getElementById('strat-swap-slippage').value) : 0.05,
-    sandwichSlippageLimit: document.getElementById('strat-sandwich-slippage').value !== '' ? Number(document.getElementById('strat-sandwich-slippage').value) : 0.05,
     
     // Advanced Bidding
     allowPartialStaking: document.getElementById('cfg-allow-partial-staking').checked,
-    
-    // AMM Dynamic Slippage
-    dynamicSlippageEnabled: document.getElementById('cfg-dynamic-slippage-enabled').checked,
-    dynamicSlippageSafetyFactor: document.getElementById('cfg-dynamic-slippage-safety-factor').value !== '' ? Number(document.getElementById('cfg-dynamic-slippage-safety-factor').value) : 0.7,
     
     // Global Default Hotkey
     defaultHotkey: document.getElementById('cfg-default-hotkey').value.trim()

@@ -248,10 +248,6 @@
                 <input type="number" id="strat-dashing-timeout-retries" min="0" max="100" placeholder="例如: 0">
               </div>
               <div class="setting-item">
-                <label>startCall 触发抢跑小费/优先费 (TAO)</label>
-                <input type="number" id="strat-dashing-tip" step="0.1" min="0">
-              </div>
-              <div class="setting-item">
                 <label>允许的最大滑点 (Slippage Limit)</label>
                 <input type="number" id="strat-dashing-slippage" step="0.01" min="0" max="1" placeholder="留空为不限制">
               </div>
@@ -318,10 +314,6 @@
                 <input type="number" id="strat-rename-timeout-retries" min="0" max="100" placeholder="例如: 0">
               </div>
               <div class="setting-item">
-                <label>改名抢跑小费/优先费 (TAO)</label>
-                <input type="number" id="strat-rename-tip" step="0.1" min="0">
-              </div>
-              <div class="setting-item">
                 <label>允许的最大滑点 (Slippage Limit)</label>
                 <input type="number" id="strat-rename-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
               </div>
@@ -369,54 +361,8 @@
                 <input type="number" id="strat-swap-timeout-retries" min="0" max="100" placeholder="例如: 0">
               </div>
               <div class="setting-item">
-                <label>交换抢跑小费/优先费 (TAO)</label>
-                <input type="number" id="strat-swap-tip" step="0.1" min="0">
-              </div>
-              <div class="setting-item">
                 <label>允许的最大滑点 (Slippage Limit)</label>
                 <input type="number" id="strat-swap-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
-              </div>
-            </div>
-          </div>
-
-          <!-- Strategy 4: Sandwich Arbitrage -->
-          <div class="card glass strategy-card">
-            <div class="strategy-header">
-              <div class="strategy-title">
-                <h3>🥪 策略 4: 大额买入三明治套利 (Sandwich Arbitrage - 方案B)</h3>
-                <p class="card-desc">全自动闭环套利：在交易池监测到用户买入大于阈值的交易时，发起更高优先小费（Frontrun Tip）强行在该买入前加仓，并在紧随其后的新区块自动抛出回补（Backrun Tip）锁定利润。</p>
-              </div>
-              <label class="switch">
-                <input type="checkbox" id="strat-sandwich-enabled">
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="strategy-settings inline-settings">
-              <div class="setting-item">
-                <label>套利金额 (TAO)</label>
-                <input type="number" id="strat-sandwich-amount" step="1" min="1">
-              </div>
-              <div class="setting-item">
-                <label>大额买入触发阈值 (TAO)</label>
-                <input type="number" id="strat-sandwich-threshold" step="10" min="1">
-              </div>
-              <div class="setting-item">
-                <label>前置买入小费 (TAO)</label>
-                <input type="number" id="strat-sandwich-tip" step="0.5" min="0">
-              </div>
-              <div class="setting-item">
-                <label>后置卖出小费 (TAO)</label>
-                <input type="number" id="strat-sandwich-sell-tip" step="0.01" min="0">
-              </div>
-              <div class="setting-item">
-                <label>允许的最大滑点 (Slippage Limit)</label>
-                <input type="number" id="strat-sandwich-slippage" step="0.01" min="0" max="1" placeholder="例如: 0.05">
-              </div>
-              <div class="setting-item">
-                <label class="checkbox-container">
-                  <input type="checkbox" id="strat-sandwich-autosell">
-                  <span class="checkmark"></span> 对方成交后自动后置抛售回补
-                </label>
               </div>
             </div>
           </div>
@@ -441,8 +387,8 @@
           <div class="card glass strategy-card">
             <div class="strategy-header">
               <div class="strategy-title">
-                <h3>⚡ 部分成交与动态滑点设置 (Partial Fill & Dynamic Slippage)</h3>
-                <p class="card-desc">配置限价单的部分成交行为以及 AMM 动态滑点计算。</p>
+                <h3>⚡ 部分成交设置 (Partial Fill)</h3>
+                <p class="card-desc">配置限价单的部分成交行为。</p>
               </div>
             </div>
             <div class="strategy-settings inline-settings">
@@ -451,16 +397,6 @@
                   <input type="checkbox" id="cfg-allow-partial-staking">
                   <span class="checkmark"></span> 允许限价单部分成交 (Allow Partial Fill)
                 </label>
-              </div>
-              <div class="setting-item">
-                <label class="checkbox-container">
-                  <input type="checkbox" id="cfg-dynamic-slippage-enabled">
-                  <span class="checkmark"></span> 启用 AMM 动态滑点 (基于恒定乘积公式与池大小计算)
-                </label>
-              </div>
-              <div class="setting-item">
-                <label>动态滑点安全因子</label>
-                <input type="number" id="cfg-dynamic-slippage-safety-factor" step="0.05" min="0.1" max="2.0" placeholder="例如: 0.7">
               </div>
             </div>
           </div>

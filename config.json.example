@@ -13,14 +13,6 @@
   "dashingRetries": 10,
   "dashingIntervalMs": 1000,
   "dashingTimeoutMs": 30000,
-  "dashingTip": 1,
   "renameEnabled": true,
-  "renameTip": 2,
-  "swapEnabled": true,
-  "swapTip": 5,
-  "sandwichEnabled": true,
-  "sandwichThreshold": 100,
-  "sandwichTip": 10,
-  "sandwichAutoSell": true,
-  "sandwichSellTip": 0.1
+  "swapEnabled": true
 }

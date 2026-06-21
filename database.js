@@ -61,7 +61,6 @@ const DEFAULT_SETTINGS = {
   dashingRetries: 10,
   dashingIntervalMs: 1000,
   dashingTimeoutMs: 30000,
-  dashingTip: 1.0, // extra priority tip
   dashingSlippageLimit: 0, // 留空为不限制相对滑点，直接为 0 (禁用)
   dashingBurstCount: 1, // number of concurrent staking transactions per wallet
   dashingDoubleStakingDelay: 0, // delay in seconds for second buy-in
@@ -73,7 +72,6 @@ const DEFAULT_SETTINGS = {
   // Strategy: Subnet Rename Frontrun
   renameEnabled: true,
   renameAmount: 100,
-  renameTip: 2.0,
   renameSlippageLimit: 0.05, // 5% slippage
   renameRetries: 1,
   renameIntervalMs: 1000,
@@ -84,7 +82,6 @@ const DEFAULT_SETTINGS = {
   // Strategy: Coldkey Swap Frontrun
   swapEnabled: true,
   swapAmount: 100,
-  swapTip: 5.0,
   swapSlippageLimit: 0.05, // 5% slippage
   swapRetries: 1,
   swapIntervalMs: 1000,
@@ -92,19 +89,8 @@ const DEFAULT_SETTINGS = {
   swapBurstCount: 1,
   swapTimeoutRetries: 0,
   
-  // Strategy: Big Buy Sandwich Arbitrage
-  sandwichEnabled: true,
-  sandwichAmount: 100,
-  sandwichThreshold: 100, // TAO threshold for detecting big buy
-  sandwichTip: 10.0, // tip for frontrun buy
-  sandwichAutoSell: true, // auto sell after victim
-  sandwichSellTip: 0.1, // tip for backrun sell
-  sandwichSlippageLimit: 0.05, // 5% slippage for sandwich buy
-  
   // Advanced priorities
   allowPartialStaking: true, // allow partial fill on limit orders
-  dynamicSlippageEnabled: true, // calculate slippage dynamically based on pool size
-  dynamicSlippageSafetyFactor: 0.7, // slippage safety multiplier (70% of expected price impact)
   broadcastNodes: [
     "wss://entrypoint-finney.opentensor.ai:443",
     "wss://archival.finney.opentensor.ai:443"
@@ -149,6 +135,19 @@ function getSettings() {
     delete settings.dashingMevShieldEnabled;
     delete settings.renameMevShieldEnabled;
     delete settings.swapMevShieldEnabled;
+    delete settings.sandwichEnabled;
+    delete settings.sandwichAmount;
+    delete settings.sandwichThreshold;
+    delete settings.sandwichTip;
+    delete settings.sandwichAutoSell;
+    delete settings.sandwichSellTip;
+    delete settings.sandwichSlippageLimit;
+    delete settings.sandwichTimeoutMs;
+    delete settings.dynamicSlippageEnabled;
+    delete settings.dynamicSlippageSafetyFactor;
+    delete settings.dashingTip;
+    delete settings.renameTip;
+    delete settings.swapTip;
     return { ...DEFAULT_SETTINGS, ...settings };
   } catch (e) {
     console.error('Error reading settings file, using defaults:', e);

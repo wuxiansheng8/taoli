@@ -136,16 +136,8 @@ const config = {
   dashingRetries: 10,
   dashingIntervalMs: 1000,
   dashingTimeoutMs: 30000,
-  dashingTip: 1.0,
   renameEnabled: true,
-  renameTip: 2.0,
-  swapEnabled: true,
-  swapTip: 5.0,
-  sandwichEnabled: true,
-  sandwichThreshold: 100,
-  sandwichTip: 10.0,
-  sandwichAutoSell: true,
-  sandwichSellTip: 0.1
+  swapEnabled: true
 };
 
 fs.writeFileSync('data/settings.json', JSON.stringify(config, null, 2), 'utf8');
