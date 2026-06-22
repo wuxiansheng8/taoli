@@ -3,6 +3,7 @@ const { cryptoWaitReady } = require('@polkadot/util-crypto');
 const axios = require('axios');
 const WebSocket = require('ws');
 const database = require('./database');
+const preheater = require('./preheater');
 
 // Logs buffer and state
 const logs = [];
@@ -557,13 +558,15 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
     }, txTimeoutMs);
 
     try {
+      const signStartTime = Date.now();
       await tx.signAsync(pair, options);
+      const signDuration = Date.now() - signStartTime;
       const signedTxHex = tx.toHex();
       const buildDuration = Date.now() - startTime;
 
       const callDetails = `${tx.method.section}.${tx.method.method}`;
       const latencyStr = (meta && meta.detectedAt) ? ` | 距交易池触发: ${Date.now() - meta.detectedAt}ms` : '';
-      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
+      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | 签名: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
 
       broadcastSignedTx(signedTxHex);
 
@@ -2431,6 +2434,9 @@ async function connectWs(reason = 'Normal Boot') {
 // Start and Stop control
 function startBot() {
   if (botStatus === 'Running' || botStatus === 'Starting') return;
+  preheater.startPreheating(5, log).catch(e => {
+    log('WARN', `[预热器] 启动异常: ${e.message || e}`);
+  });
   connectWs('User triggered start').catch(e => {
     botStatus = 'Error';
     log('ERROR', `启动机器人异常: ${e.message}`);
@@ -2441,6 +2447,8 @@ function startBot() {
 function stopBot() {
   botStatus = 'Stopped';
   log('INFO', '套利机器人正在关闭...');
+  
+  preheater.stopPreheating();
   
   connectGeneration++;
   isConnecting = false;
