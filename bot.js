@@ -2382,8 +2382,9 @@ async function connectWs(reason = 'Normal Boot') {
 
     });
 
-    // 只抬下限为 50ms，不设上限，允许用户手动降压放慢扫描速度
-    const pollInterval = Math.max(50, settings.mempoolPollIntervalMs || 100);
+    // 只抬下限为 10ms，不设上限，允许用户手动降压放慢扫描速度
+    const pollInterval = Math.max(10, settings.mempoolPollIntervalMs || 100);
+    log('INFO', `[Mempool] 交易池高频扫描频率已生效：${pollInterval}ms`);
 
     if (pollTimer) clearTimeout(pollTimer);
 
