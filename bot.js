@@ -54,14 +54,14 @@ let broadcastLatencyTimer = null;
 function initBroadcastNodes() {
   const settings = database.getSettings();
   const nodes = settings.broadcastNodes || [];
-  
+
   // Close old connections
   for (const provider of broadcastProviders.values()) {
     try { provider.disconnect(); } catch (e) {}
   }
   broadcastProviders.clear();
   broadcastStatuses.clear();
-  
+
   log('INFO', `正在初始化 ${nodes.length} 个备用广播节点...`);
   for (const url of nodes) {
     if (!url) continue;
@@ -69,7 +69,7 @@ function initBroadcastNodes() {
       const prov = new WsProvider(url, false);
       broadcastProviders.set(url, prov);
       broadcastStatuses.set(url, { status: 'Disconnected', latency: -1 });
-      
+
       prov.on('connected', () => {
         broadcastStatuses.set(url, { status: 'Connected', latency: -1 });
       });
@@ -79,7 +79,7 @@ function initBroadcastNodes() {
       prov.on('error', () => {
         broadcastStatuses.set(url, { status: 'Disconnected', latency: -1 });
       });
-      
+
       prov.connect();
     } catch (err) {
       log('WARN', `初始化广播节点 ${url} 失败: ${err.message}`);
@@ -102,7 +102,7 @@ async function testBroadcastNodes() {
       }
     }
   }
-  
+
   if (changed) {
     initBroadcastNodes();
   }
@@ -127,7 +127,7 @@ async function testBroadcastNodes() {
     promises.push(testPromise);
   }
   await Promise.allSettled(promises);
-  
+
   if (global.blockCallback) {
     global.blockCallback(currentBlockHeight);
   }
@@ -161,14 +161,14 @@ async function refreshSubnetOwnersCache() {
   try {
     const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
     const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());
-    
+
     // 批量并发查询所有子网的 Owner 冷键、Owner Hotkey 以及注册区块号
     const [owners, ownerHotkeys, registeredBlocks] = await Promise.all([
       api.query.subtensorModule.subnetOwner.multi(activeNetuids),
       api.query.subtensorModule.subnetOwnerHotkey.multi(activeNetuids),
       api.query.subtensorModule.networkRegisteredAt.multi(activeNetuids)
     ]);
-    
+
     const changes = [];
     const isFirstSync = subnetOwnersCache.size === 0;
 
@@ -218,7 +218,7 @@ async function refreshSubnetOwnersCache() {
       const ownerStr = owners[i]?.toString();
       const hotkeyStr = ownerHotkeys[i]?.toString();
       const registeredBlock = Number(registeredBlocks[i]?.toString() || 0);
-      
+
       if (ownerStr) {
         subnetOwnersCache.set(netuid, ownerStr);
         subnetOwnerSet.add(ownerStr);
@@ -265,17 +265,17 @@ function log(level, message) {
   const d = new Date();
   const utc = d.getTime() + (d.getTimezoneOffset() * 60000);
   const beijingTime = new Date(utc + (3600000 * 8));
-  
+
   const timeStr = beijingTime.toISOString().replace('T', ' ').replace('Z', '');
   const formattedLog = {
     time: timeStr,
     level: level.toUpperCase(), // 'INFO', 'WARN', 'ERROR', 'SUCCESS'
     message: message
   };
-  
+
   logs.push(formattedLog);
   if (logs.length > maxLogs) logs.shift();
-  
+
   // Console logging
   const colors = {
     INFO: '\x1b[36m',    // Cyan
@@ -286,7 +286,7 @@ function log(level, message) {
   const resetColor = '\x1b[0m';
   const color = colors[formattedLog.level] || '';
   console.log(`[${timeStr}] [${color}${formattedLog.level}${resetColor}] ${message}`);
-  
+
   if (global.logCallback) {
     global.logCallback(formattedLog);
   }
@@ -344,7 +344,7 @@ function testApiUrl(url) {
     } catch (e) {
       return resolve({ success: false, error: e.message });
     }
-    
+
     let settled = false;
     ws.on('open', () => {
       ws.send(JSON.stringify({
@@ -354,7 +354,7 @@ function testApiUrl(url) {
         params: []
       }));
     });
-    
+
     ws.on('message', () => {
       if (settled) return;
       settled = true;
@@ -362,14 +362,14 @@ function testApiUrl(url) {
       ws.close();
       resolve({ success: true, latency });
     });
-    
+
     ws.on('error', (err) => {
       if (settled) return;
       settled = true;
       try { ws.close(); } catch (e) {}
       resolve({ success: false, error: err.message });
     });
-    
+
     setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -386,7 +386,7 @@ async function refreshWalletState(address, nonceForwardOnly = false) {
     const account = await api.query.system.account(address);
     const freePlanck = BigInt(account.data.free.toString());
     const freeTao = Number(freePlanck) / 1e9;
-    
+
     const nonce = await api.rpc.system.accountNextIndex(address);
     const nextNonce = Number(nonce.toString());
 
@@ -404,30 +404,30 @@ async function refreshWalletState(address, nonceForwardOnly = false) {
 async function refreshAllWallets() {
   const activeWallets = getWalletsStatus();
   if (wallets.length === 0 || !api || !api.isConnected) return activeWallets;
-  
+
   log('INFO', '正在通过 Batch Queries 批量更新钱包余额与 Nonce...');
   try {
     const addresses = wallets.map(w => w.pair.address);
-    
+
     // Batch query account states
     const accounts = await api.query.system.account.multi(addresses);
-    
+
     // Batch query nonces concurrently
     const noncePromises = addresses.map(addr => api.rpc.system.accountNextIndex(addr).catch(() => 0));
     const nonces = await Promise.all(noncePromises);
-    
+
     log('INFO', `[钱包状态同步] 批量同步完成：`);
     for (let i = 0; i < wallets.length; i++) {
       const address = addresses[i];
       const account = accounts[i];
       const nextNonce = Number(nonces[i].toString());
-      
+
       const freePlanck = BigInt(account.data.free.toString());
       const freeTao = Number(freePlanck) / 1e9;
-      
+
       balanceByAddress.set(address, { freeTao, updatedAt: new Date(Date.now() + 8 * 3600000).toISOString() });
       nextNonceByAddress.set(address, nextNonce);
-      
+
       log('INFO', `  ├─ 钱包【${wallets[i].name}】: 余额 ${freeTao.toFixed(2)} TAO | 链上 Nonce: ${nextNonce}`);
     }
   } catch (e) {
@@ -441,14 +441,14 @@ async function refreshAllWallets() {
 async function reloadWallets(actionContext = null) {
   await cryptoWaitReady();
   keyring = new Keyring({ type: 'sr25519' });
-  
+
   if (actionContext) {
     log('SUCCESS', `[钱包管理] ${actionContext}`);
   }
   log('INFO', '正在重新加载数据库中的钱包至内存中...');
   const localWallets = database.getWallets(true); // Decrypted secrets
   const newWallets = [];
-  
+
   for (const w of localWallets) {
     try {
       const pair = keyring.addFromUri(w.secret.trim());
@@ -462,7 +462,7 @@ async function reloadWallets(actionContext = null) {
       log('ERROR', `重新加载钱包 ${w.name} 私钥失败: ${e.message}`);
     }
   }
-  
+
   wallets = newWallets;
   await refreshAllWallets();
 }
@@ -566,7 +566,7 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
 
       const callDetails = `${tx.method.section}.${tx.method.method}`;
       const latencyStr = (meta && meta.detectedAt) ? ` | 距交易池触发: ${Date.now() - meta.detectedAt}ms` : '';
-      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | 签名: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
+      log('INFO', `[发送交易] 钱包【${pair.address.slice(-6)}】已签名并提交 ${callDetails} | Nonce: ${reservedNonce} | 签名耗时: ${signDuration}ms | 本地构建耗时: ${buildDuration}ms${latencyStr}`);
 
       broadcastSignedTx(signedTxHex);
 
@@ -582,7 +582,7 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
             finish({ success: false, error: errorInfo });
           } else {
             const blockHash = status.isInBlock ? status.asInBlock : status.asFinalized;
-            
+
             // 异步提取成交区块号和排队索引，不阻塞 UI 响应
             Promise.resolve().then(async () => {
               let blockNumber = null;
@@ -594,7 +594,7 @@ async function sendTx(tx, pair, txTimeoutMs = 15000, nonce = null, meta = null) 
                   txIndex = block.block.extrinsics.findIndex(x => x.hash.toHex() === tx.hash.toHex());
                 }
               } catch (err) {}
-              
+
               finish({
                 success: true,
                 hash: tx.hash.toHex(),
@@ -643,7 +643,7 @@ async function sendStrategicTx(tx, pair, txTimeoutMs = 15000, meta = null) {
 function parseExtrinsic(ext) {
   try {
     if (!ext || !ext.method) return null;
-    
+
     const section = String(ext.method.section || '').trim();
     const callName = String(ext.method.method || '').trim();
     const signer = ext.signer ? ext.signer.toString() : 'unsigned';
@@ -662,7 +662,7 @@ function parseExtrinsic(ext) {
     for (let i = 0; i < argsArray.length; i++) {
       args[i] = argsArray[i];
     }
-    
+
     // Map named arguments based on runtime metadata
     if (ext.method.meta && ext.method.meta.args) {
       for (let i = 0; i < ext.method.meta.args.length; i++) {
@@ -689,7 +689,7 @@ function parseExtrinsic(ext) {
 // Compute next subnet to prune based on Yuma Consensus rules
 async function getNextPruneCandidate(currentBlock) {
   let pruneNetuidVal = null;
-  
+
   // 路径 A: 尝试 Runtime API 路径
   try {
     if (api.call.subnetInfoRuntimeApi && api.call.subnetInfoRuntimeApi.getSubnetToPrune) {
@@ -747,7 +747,7 @@ async function getNextPruneCandidate(currentBlock) {
   try {
     const netuidKeys = await api.query.subtensorModule.networksAdded.keys();
     const activeNetuids = netuidKeys.map(({ args: [netuid] }) => netuid.toNumber());
-    
+
     if (activeNetuids.length === 0) return null;
 
     // Batch query network parameters to minimize RPC roundtrips from 384 sequential queries to 3 batch queries
@@ -756,7 +756,7 @@ async function getNextPruneCandidate(currentBlock) {
       api.query.subtensorModule.immunityPeriod.multi(activeNetuids),
       api.query.subtensorModule.emission.multi(activeNetuids)
     ]);
-    
+
     let bestCandidate = null;
     let lowestEmission = null;
     let earliestRegisteredAt = null;
@@ -821,8 +821,8 @@ async function getSubnetPrice(netuid) {
 // Build addStake or addStakeLimit based on metadata compatibility
 async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit, maxPriceLimit = 0, passedPrice = null) {
   const hasLimitCall = typeof api.tx.subtensorModule.addStakeLimit === 'function';
-  
-  const hasLimitProtection = (slippageLimit !== undefined && slippageLimit !== null && slippageLimit > 0) || 
+
+  const hasLimitProtection = (slippageLimit !== undefined && slippageLimit !== null && slippageLimit > 0) ||
                             (maxPriceLimit !== undefined && maxPriceLimit !== null && maxPriceLimit > 0);
 
   if (hasLimitProtection) {
@@ -831,16 +831,16 @@ async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit, maxPric
       if (currentPrice === null) {
         currentPrice = await getSubnetPrice(netuid);
       }
-      
+
       if (currentPrice !== null) {
         const settings = database.getSettings();
         const priceInTao = Number(currentPrice) / 1e9;
-        
+
         // 校验是否硬超限（在 buildStakeTx 内部做二次兜底校验，主要防超时重试等其它调用渠道未检查）
         if (maxPriceLimit > 0 && priceInTao > maxPriceLimit) {
           throw new Error(`Price exceeds limit: current ${priceInTao.toFixed(4)} TAO/Alpha, limit ${maxPriceLimit.toFixed(4)} TAO/Alpha`);
         }
-        
+
         let limitPrice;
         if (slippageLimit > 0 && maxPriceLimit > 0) {
           const slippageMultiplier = 1.0 + parseFloat(slippageLimit);
@@ -854,7 +854,7 @@ async function buildStakeTx(hotkey, netuid, amountBigInt, slippageLimit, maxPric
           // 仅启用了最高限价，无滑点相对限制
           limitPrice = BigInt(Math.floor(maxPriceLimit * 1e9));
         }
-        
+
         const allowPartial = settings.allowPartialStaking !== false;
         return api.tx.subtensorModule.addStakeLimit(hotkey, netuid, amountBigInt, limitPrice, allowPartial);
       } else {
@@ -910,7 +910,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                       `• <b>首发状态</b>: <code>${statusStr}</code>\n` +
                       `━━━━━━━━━━━━━━━━━━\n` +
                       `<i>⚠️ 检测到新子网已提交注册！请做好准备，等待所有者 startCall 激活以启动极速打新！</i>`;
-        
+
         log('WARN', `🚨 [新子网注册 - 扫入交易池] 检测到新子网已提交注册！目标槽位: SN#${targetNetuid}, 状态: ${statusStr}`);
         sendTelegramAlert(tgMsg).catch(() => {});
         return true;
@@ -949,16 +949,16 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
           const triggerSrc = `${fallbackSource}-startCall`;
           const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
           const isFallback = fallbackSource === 'Block-Fallback';
-          
+
           const title = isFallback ? `⚠️ <b>[区块兜底/漏扫补发 - 新子网打新]</b>` : `🔔 <b>[新子网打新 - 扫到激活交易]</b>`;
           const blockStr = isFallback && blockNum ? `• <b>漏扫区块</b>: <code>#${blockNum}</code>\n` : '';
-          const footer = isFallback 
-            ? `<i>⚠️ 交易池已漏扫，正在执行区块后置补发买入...</i>` 
+          const footer = isFallback
+            ? `<i>⚠️ 交易池已漏扫，正在执行区块后置补发买入...</i>`
             : `<i>🔥 策略 1 开启，立即启动极速打新！</i>`;
 
           if (settings.dashingEnabled) {
             log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})！子网 #${netuid}，立即执行极速 Staking 抢购！`);
-            
+
             const tgMsg = `${title}\n` +
                           `━━━━━━━━━━━━━━━━━━\n` +
                           `• <b>激活子网</b>: <code>SN#${netuid}</code>\n` +
@@ -974,11 +974,11 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
             });
           } else {
             log('INFO', `[新子网打新] 扫到所有者 startCall 激活交易 (${triggerSrc})。策略 1 主开关已关闭，跳过主线买入。`);
-            
-            const statusText = doubleStakingDelay > 0 
+
+            const statusText = doubleStakingDelay > 0
               ? `主开关关闭，跳过主线买入（仅保留延迟 ${doubleStakingDelay} 秒买入）`
               : `策略 1 未开启，跳过打新买入`;
-            
+
             const tgMsg = `⚠️ <b>[新子网打新 - 扫到激活交易]</b>\n` +
                           `━━━━━━━━━━━━━━━━━━\n` +
                           `• <b>激活子网</b>: <code>SN#${netuid}</code>\n` +
@@ -989,7 +989,7 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
                           `<i>⚠️ ${statusText}。</i>`;
             sendTelegramAlert(tgMsg).catch(() => {});
           }
-          
+
           // 执行二次延迟交易逻辑 - 倒计时起点为检测到 startCall 的这一瞬间
           handleDoubleStaking(netuid, targetHotkey, fallbackSource, now);
         } else {
@@ -1064,8 +1064,8 @@ async function handlePendingExtrinsic(parsed, fallbackSource = 'Mempool', blockN
           const isFallback = fallbackSource === 'Block-Fallback';
           const title = isFallback ? `⚠️ <b>[区块兜底/漏扫补发 - 改名抢跑]</b>` : `🚀 <b>[改名抢跑 触发]</b>`;
           const triggerBlockStr = isFallback && blockNum ? `• <b>漏扫区块</b>: <code>#${blockNum}</code>\n` : '';
-          const footer = isFallback 
-            ? `<i>⚠️ 交易池已漏扫，正在执行区块后置补发买入...</i>` 
+          const footer = isFallback
+            ? `<i>⚠️ 交易池已漏扫，正在执行区块后置补发买入...</i>`
             : `<i>🔥 策略 2 开启，正在执行前置买入...</i>`;
 
           if (settings.renameEnabled) {
@@ -1297,7 +1297,7 @@ async function detectEventsInBlock(blockHash, blockNumber) {
         if (w) {
           const amountTao = (Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2);
           log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
-          
+
           let strategyLabel = '新子网打新';
           const nowTime = Date.now();
           for (const [key, ts] of seenActions.entries()) {
@@ -1342,12 +1342,12 @@ async function detectEventsInBlock(blockHash, blockNumber) {
     const meth = String(ext.method.method || '').trim();
 
     // Cheap string checks first to save CPU before parsing
-    const isRename = settings.renameEnabled && 
-      /^subtensor(Module)?$/i.test(sec) && 
+    const isRename = settings.renameEnabled &&
+      /^subtensor(Module)?$/i.test(sec) &&
       /^(setSubnetIdentity|set_subnet_identity)$/i.test(meth);
 
-    const isSwap = settings.swapEnabled && 
-      /^subtensor(Module)?$/i.test(sec) && 
+    const isSwap = settings.swapEnabled &&
+      /^subtensor(Module)?$/i.test(sec) &&
       /^(announceColdkeySwap|announce_coldkey_swap)$/i.test(meth);
 
     const isStartCall = dashingActive &&
@@ -1533,7 +1533,7 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
   }
 
   log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
-  
+
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
   const txPromises = [];
 
@@ -1628,7 +1628,7 @@ async function executeTimeoutRetry(
   const settings = database.getSettings();
   const actualMaxRetries = maxTimeoutRetries !== null ? maxTimeoutRetries : (settings.dashingTimeoutRetries || 0);
   if (attemptNum > actualMaxRetries) return { success: false, error: 'Max timeout retries reached' };
-  
+
   const parts = label.split(':');
   const baseLabel = parts[0];
   const suffix = parts[1];
@@ -1639,36 +1639,36 @@ async function executeTimeoutRetry(
     successKey = `${label}:${netuid}:${targetHotkey}`;
   }
   if (dashingSuccessByNetuid.get(successKey)) return { success: true };
-  
+
   // Prevent duplicate concurrent timeout retries for the same wallet
   const key = `${label}:${netuid}:${targetHotkey}:${w.name}`;
   const currentActive = activeTimeoutRetryNumByWallet.get(key) || 0;
   if (attemptNum <= currentActive) return { success: false, error: 'Duplicate retry' };
   activeTimeoutRetryNumByWallet.set(key, attemptNum);
-  
+
   log('WARN', `[${label}] 钱包【${w.name}】交易超时。触发第 ${attemptNum}/${actualMaxRetries} 次超时重试...`);
-  
+
   // Wait 1 second before retrying to ensure the nonce query inside sendTx timeout handler completed
   await new Promise(resolve => setTimeout(resolve, 1000));
-  
+
   if (dashingSuccessByNetuid.get(successKey)) return { success: true };
-  
+
   const actualAmount = customAmount !== null ? customAmount : settings.dashingAmount;
   const actualSlippageLimit = customSlippageLimit !== null ? customSlippageLimit : settings.dashingSlippageLimit;
   const actualTimeoutMs = customTimeoutMs !== null ? customTimeoutMs : (settings.dashingTimeoutMs || 30000);
-  
+
   // 确认 maxPriceLimit 的来源（支持参数传入或使用 settings 对应策略通道的默认配置）
   const isDoubleStaking = label.endsWith('DoubleStaking');
-  const actualMaxPriceLimit = customMaxPriceLimit !== null 
-    ? customMaxPriceLimit 
+  const actualMaxPriceLimit = customMaxPriceLimit !== null
+    ? customMaxPriceLimit
     : (isDoubleStaking ? Number(settings.dashingDoubleMaxPrice || 0) : Number(settings.dashingMaxPrice || 0));
-  
+
   try {
     const amountBigInt = BigInt(Math.floor(actualAmount * 1e9));
-    
+
     // 调用 buildStakeTx，传入 actualMaxPriceLimit，由于重试没有缓存在 round 里的价格，传入 null 让其自动 RPC 获取最新价格
     const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, actualSlippageLimit, actualMaxPriceLimit, null);
-    
+
     const p = new Promise((resolve) => {
       sendStrategicTx(tx, w.pair, actualTimeoutMs, {
         netuid,
@@ -1680,7 +1680,7 @@ async function executeTimeoutRetry(
         if (res.success) {
           log('SUCCESS', `[${label}] 超时重试 #${attemptNum} - 钱包【${w.name}】购买成功！交易哈希: ${res.hash}`);
           dashingSuccessByNetuid.set(successKey, true);
- 
+
           if (successfulSnipes) {
             successfulSnipes.push({
               walletName: w.name,
@@ -1691,7 +1691,7 @@ async function executeTimeoutRetry(
           } else {
             const blockStr = res.blockNumber ? `• <b>成交区块</b>: <code>#${res.blockNumber}</code>\n` : '';
             const idxStr = (res.txIndex !== null && res.txIndex !== undefined) ? `• <b>排队位置</b>: <code>第 ${res.txIndex} 笔交易</code>\n` : '';
- 
+
             sendTelegramAlert(
               `✅ <b>[${label} 超时重试成功]</b>\n` +
               `━━━━━━━━━━━━━━━━━━\n` +
@@ -1715,13 +1715,13 @@ async function executeTimeoutRetry(
         }
       });
     });
- 
+
     if (attemptNum === 1) {
       p.finally(() => {
         activeTimeoutRetryNumByWallet.delete(key);
       });
     }
- 
+
     return p;
   } catch (e) {
     if (e.message.includes('Price exceeds limit')) {
@@ -1769,7 +1769,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   }
 
   const successKey = `新子网打新:${netuid}:${targetHotkey}:${isDoubleStaking ? 'DoubleStaking' : 'Primary'}`;
-  
+
   // 2. 24小时冷却时间校验（主打新与二次打新冷却是分开独立的）
   const cooldownKey = isDoubleStaking ? `new-subnet-double:${netuid}` : `new-subnet:${netuid}`;
   const cooldown = database.getCooldown(cooldownKey);
@@ -1829,7 +1829,7 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
   const amountBigInt = BigInt(Math.floor(settings.dashingAmount * 1e9));
   const retries = Math.max(1, settings.dashingRetries || 10);
   const interval = Math.max(50, settings.dashingIntervalMs || 1000);
-  
+
   // 获取最大价格限额
   const maxPriceLimit = isDoubleStaking && settings.dashingDoubleMaxPrice !== undefined
     ? Number(settings.dashingDoubleMaxPrice || 0)
@@ -1866,14 +1866,14 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       }
 
       log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
-      
+
       for (const w of activeWallets) {
         for (let i = 0; i < burstCount; i++) {
           try {
             // 透传 currentPrice 避免内部重复查价格，降低 RPC 交互延迟
             const tx = await buildStakeTx(targetHotkey, netuid, amountBigInt, slippageLimit, maxPriceLimit, currentPrice);
             log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
-            
+
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
             const p = sendStrategicTx(tx, w.pair, settings.dashingTimeoutMs, {
               netuid,
@@ -1923,19 +1923,19 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
             .map(r => r.status === 'fulfilled' ? r.value?.error : r.reason?.message)
             .filter(Boolean);
           const uniqueErrors = [...new Set(errorMsgs)].slice(0, 3).join('; ');
-          
+
           const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: ${escapeHtml(uniqueErrors || '所有交易提交超时或未成功上链')}`;
           log('ERROR', msg);
           sendTelegramAlert(msg).catch(() => {});
         }
       }).finally(unlock);
-      
+
       // 2. 超时兜底释放（例如 3分钟）：如果因未知原因 Promise 挂起，强制解锁防止永久死锁
-      setTimeout(unlock, 180000); 
+      setTimeout(unlock, 180000);
     } else {
       // 若一笔交易都未发出（例如 buildStakeTx 抛错），延迟短窗口解锁，防止下个区块到达时瞬间再次重复触发
       setTimeout(unlock, Math.max(3000, interval));
-      
+
       if (stoppedByPriceLimit) {
         const msg = `⚠️ [新子网打新 停止]\n子网: #${netuid}\n触发源: ${triggerSource}\n原因: 价格保护触发，已按配置停止买入`;
         log('WARN', msg);
@@ -1993,37 +1993,37 @@ async function detectNewSubnetOnChain(blockHeight) {
     let detected = false;
     // 1. 从缓存中获取已知的子网列表
     const cachedNetuids = Array.from(subnetRegisteredAtCache.keys());
-    
+
     // 如果缓存为空（例如启动时加载失败），构建默认的查询列表 (0 到 32)
-    const netuidsToQuery = cachedNetuids.length > 0 
-      ? [...cachedNetuids] 
+    const netuidsToQuery = cachedNetuids.length > 0
+      ? [...cachedNetuids]
       : Array.from({ length: 33 }, (_, i) => i);
-      
+
     // 2. 预测并包含下一个可能新增的 netuid (maxCached + 1)
     const maxCached = cachedNetuids.length > 0 ? Math.max(...cachedNetuids) : -1;
     if (maxCached >= 0 && maxCached < 256) {
       netuidsToQuery.push(maxCached + 1);
     }
-    
+
     // 3. 仅用一个批处理 RPC 查询所有这些子网的最新注册区块
     const registeredBlocks = await api.query.subtensorModule.networkRegisteredAt.multi(netuidsToQuery);
-    
+
     for (let i = 0; i < netuidsToQuery.length; i++) {
       const netuid = netuidsToQuery[i];
       const regBlockVal = registeredBlocks[i];
       if (!regBlockVal || regBlockVal.isEmpty) continue;
-      
+
       const regBlock = Number(regBlockVal.toString());
       if (regBlock === 0) continue;
-      
+
       // 获取该子网已缓存的注册区块号
       const cachedRegBlock = subnetRegisteredAtCache.get(netuid);
-      
+
       // 如果注册区块与当前区块相同，且（缓存中不存在该子网，或缓存的注册区块小于最新注册区块）
       // 这说明：要么是一个全新的 netuid，要么是一个被接管回收(recycled)的 netuid！
       if (regBlock === blockHeight && (!cachedRegBlock || cachedRegBlock < regBlock)) {
         subnetRegisteredAtCache.set(netuid, regBlock);
-        
+
         const alertMsg = `🔔 <b>[区块确认 - 新子网已上链]</b>\n` +
                          `━━━━━━━━━━━━━━━━━━\n` +
                          `• <b>发现子网</b>: <code>SN#${netuid}</code>\n` +
@@ -2056,19 +2056,19 @@ async function poll() {
     if (!pendingHexs || pendingHexs.length === 0) {
       return;
     }
-    
+
     const now = Date.now();
-    
+
     // 限制每 10 秒清理一次过期的 seenHashes 和 seenActions 缓存，避免每次轮询重复遍历 Map
     if (now - lastTtlCleanupTime > 10000) {
       lastTtlCleanupTime = now;
-      
+
       // 5分钟过期的哈希清理
       for (const [hash, entry] of seenHashes.entries()) {
         const timestamp = (entry && typeof entry === 'object') ? entry.timestamp : entry;
         if (now - timestamp > 5 * 60 * 1000) seenHashes.delete(hash);
       }
-      
+
       // 10分钟过期的动作清理
       for (const [action, timestamp] of seenActions.entries()) {
         if (now - timestamp > 10 * 60 * 1000) seenActions.delete(action);
@@ -2083,7 +2083,7 @@ async function poll() {
         } else {
           ext = api.createType('Extrinsic', hex.toString());
         }
-        
+
         const parsed = parseExtrinsic(ext);
         if (!parsed) continue;
 
@@ -2104,7 +2104,7 @@ async function poll() {
           if (now - hashEntry.timestamp < 3000) continue; // 限制失败交易重试频率为最快每 3 秒一次，防止高频砸 RPC 节点和刷警告日志
         }
 
-        if (/^subtensor(Module)?$/i.test(parsed.section) && 
+        if (/^subtensor(Module)?$/i.test(parsed.section) &&
             /^(registerNetwork|register_network|setSubnetIdentity|set_subnet_identity|announceColdkeySwap|announce_coldkey_swap|startCall|start_call)$/i.test(parsed.callName)) {
           const handled = await handlePendingExtrinsic(parsed, 'Mempool');
           seenHashes.set(parsed.txHash, {
@@ -2167,7 +2167,7 @@ function scheduleReconnect() {
 // Disconnect helper specifically for triggering reconnect flow
 function disconnectForReconnect(reason) {
   log('WARN', `因 ${reason} 断开连接，准备自动重连...`);
-  
+
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
@@ -2185,7 +2185,7 @@ function disconnectForReconnect(reason) {
   }
   broadcastProviders.clear();
   broadcastStatuses.clear();
-  
+
   if (api) {
     try { api.disconnect(); } catch (e) {}
     api = null;
@@ -2195,10 +2195,10 @@ function disconnectForReconnect(reason) {
   currentLatency = -1;
   systemUptimeStart = null;
   activeTimeoutRetryNumByWallet.clear();
-  
+
   connectGeneration++;
   isConnecting = false;
-  
+
   botStatus = 'Error';
   scheduleReconnect();
 }
@@ -2214,10 +2214,10 @@ async function connectWs(reason = 'Normal Boot') {
 
   botStatus = 'Starting';
   log('INFO', `正在建立连接 [触发原因: ${reason}]...`);
-  
+
   const settings = database.getSettings();
   const targets = [settings.primaryNode, settings.backupNode].filter(Boolean);
-  
+
   if (targets.length === 0) {
     botStatus = 'Error';
     log('ERROR', '未配置任何 API 节点，请检查系统设置！');
@@ -2234,17 +2234,17 @@ async function connectWs(reason = 'Normal Boot') {
     try {
       log('INFO', `尝试连接节点: ${url}...`);
       currentActiveNode = url;
-      
+
       provider = new WsProvider(url, false);
-      
+
       const connPromise = new Promise((resolve, reject) => {
         provider.on('connected', () => resolve(true));
         provider.on('error', (err) => reject(err));
         provider.connect();
       });
-      
+
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Connection Timeout')), 6000));
-      
+
       await Promise.race([connPromise, timeoutPromise]);
       if (generation !== connectGeneration || botStatus === 'Stopped') {
         try { provider.disconnect(); } catch (err) {}
@@ -2252,7 +2252,7 @@ async function connectWs(reason = 'Normal Boot') {
         isConnecting = false;
         return;
       }
-      
+
       api = await ApiPromise.create({
         provider,
         rpc: {
@@ -2276,7 +2276,7 @@ async function connectWs(reason = 'Normal Boot') {
         isConnecting = false;
         return;
       }
-      
+
       log('SUCCESS', `成功连接至节点: ${url} (链名称: ${api.runtimeChain || 'Subtensor'}, Spec版本: ${api.runtimeVersion?.specVersion || 'unknown'}, 创世哈希: ${api.genesisHash?.toHex().slice(0, 10)}...)`);
       connected = true;
       break;
@@ -2320,7 +2320,7 @@ async function connectWs(reason = 'Normal Boot') {
     log('INFO', '[API初始化] 正在加载本地小号钱包并同步链上 Nonce 与余额...');
     await reloadWallets();
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
-    
+
     log('INFO', '[API初始化] 正在批量拉取链上所有活跃子网的注册区块、Owner 和 Hotkey 信息...');
     await refreshSubnetOwnersCache();
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
@@ -2359,7 +2359,7 @@ async function connectWs(reason = 'Normal Boot') {
       detectEventsInBlock(header.hash, blockNumber).catch(e => {
         log('WARN', `[区块兜底] 解析新区块 #${blockNumber} 失败: ${e.message}`);
       });
-      
+
       const settings = database.getSettings();
       const doubleStakingDelay = Number(settings.dashingDoubleStakingDelay || 0);
       const dashingActive = settings.dashingEnabled || doubleStakingDelay > 0;
@@ -2370,7 +2370,7 @@ async function connectWs(reason = 'Normal Boot') {
             await refreshSubnetOwnersCache();
           }
         };
-        
+
         runDashingFlow().catch(e => {
           log('WARN', `[新子网打新] 链上自愈检测/缓存同步失败: ${e.message}`);
         });
@@ -2384,9 +2384,9 @@ async function connectWs(reason = 'Normal Boot') {
 
     // 只抬下限为 50ms，不设上限，允许用户手动降压放慢扫描速度
     const pollInterval = Math.max(50, settings.mempoolPollIntervalMs || 100);
-    
+
     if (pollTimer) clearTimeout(pollTimer);
-    
+
     // 改为自适应递归轮询，并引入代次校验锁，防止重连后旧的轮询链复活（双轮询洞）
     const runPoll = async () => {
       if (generation !== connectGeneration || botStatus !== 'Running') return;
@@ -2447,16 +2447,16 @@ function startBot() {
 function stopBot() {
   botStatus = 'Stopped';
   log('INFO', '套利机器人正在关闭...');
-  
+
   preheater.stopPreheating();
-  
+
   connectGeneration++;
   isConnecting = false;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
-  
+
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
@@ -2469,13 +2469,13 @@ function stopBot() {
     clearInterval(broadcastLatencyTimer);
     broadcastLatencyTimer = null;
   }
-  
+
   for (const provider of broadcastProviders.values()) {
     try { provider.disconnect(); } catch (e) {}
   }
   broadcastProviders.clear();
   broadcastStatuses.clear();
-  
+
   if (api) {
     try {
       api.disconnect();
@@ -2494,7 +2494,7 @@ function clearCooldown(strategy) {
   try {
     // 1. 清理持久化数据库冷却记录
     const clearedCount = database.clearCooldownsByStrategy(strategy);
-    
+
     // 2. 清理内存中的防重打新成功状态 (dashingSuccessByNetuid)
     let memoryClearedCount = 0;
     for (const key of dashingSuccessByNetuid.keys()) {
@@ -2507,7 +2507,7 @@ function clearCooldown(strategy) {
         memoryClearedCount++;
       }
     }
-    
+
     // 3. 清理对应的运行锁 (activeSnipesByNetuid)
     let lockClearedCount = 0;
     for (const key of Array.from(activeSnipesByNetuid)) {
@@ -2528,7 +2528,7 @@ function clearCooldown(strategy) {
         }
       }
     }
-    
+
     log('INFO', `[清理冷却] 清理了策略 [${strategy}] 的冷却与运行锁。已删除 ${clearedCount} 个持久化记录、${memoryClearedCount} 个内存状态和 ${lockClearedCount} 个运行锁。`);
     return {
       success: true,

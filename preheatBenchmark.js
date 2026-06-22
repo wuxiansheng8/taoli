@@ -28,7 +28,7 @@ async function runBenchmark() {
   const keyring = new Keyring({ type: 'sr25519' });
   const pairCold = keyring.addFromUri('//TaoliPreheatDummyCold');
   const pairWarm = keyring.addFromUri('//TaoliPreheatDummyWarm');
-  
+
   const msgCold = Buffer.from('Cold Message');
   const msgWarm = Buffer.from('Warm Message');
   logToFile(`测试密钥对创建完毕。\n`);
