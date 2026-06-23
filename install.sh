@@ -139,7 +139,8 @@ const config = {
   dashingIntervalMs: 1000,
   dashingTimeoutMs: 30000,
   renameEnabled: true,
-  swapEnabled: true
+  swapEnabled: true,
+  nonceSyncIntervalSeconds: 60
 };
 
 fs.writeFileSync('data/settings.json', JSON.stringify(config, null, 2), 'utf8');
