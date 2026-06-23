@@ -296,6 +296,9 @@ async function loadConfig() {
     document.getElementById('cfg-tg-enabled').checked = cfg.telegramEnabled;
     document.getElementById('cfg-tg-token').value = cfg.telegramToken;
     document.getElementById('cfg-tg-chatid').value = cfg.telegramChatId;
+    document.getElementById('cfg-fd-enabled').checked = cfg.flashDutyEnabled;
+    document.getElementById('cfg-fd-webhook').value = cfg.flashDutyWebhookUrl || '';
+    document.getElementById('cfg-fd-cooldown').value = cfg.flashDutyCooldownMs !== undefined ? Math.floor(cfg.flashDutyCooldownMs / 1000) : 300;
     document.getElementById('cfg-web-port').value = cfg.webPort;
     document.getElementById('cfg-web-user').value = cfg.webUser;
     
@@ -538,6 +541,9 @@ document.getElementById('settings-form').onsubmit = async (e) => {
     telegramEnabled: document.getElementById('cfg-tg-enabled').checked,
     telegramToken: document.getElementById('cfg-tg-token').value,
     telegramChatId: document.getElementById('cfg-tg-chatid').value,
+    flashDutyEnabled: document.getElementById('cfg-fd-enabled').checked,
+    flashDutyWebhookUrl: document.getElementById('cfg-fd-webhook').value.trim(),
+    flashDutyCooldownMs: Number(document.getElementById('cfg-fd-cooldown').value || 300) * 1000,
     webPort: Number(document.getElementById('cfg-web-port').value),
     webUser: document.getElementById('cfg-web-user').value,
     broadcastNodes: broadcastNodes
@@ -609,6 +615,35 @@ document.getElementById('btn-test-tg').onclick = async () => {
   try {
     const start = Date.now();
     const res = await apiFetch('/api/test-tg', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    if (res.success) {
+      resultEl.className = 'test-result success';
+      resultEl.innerText = `推送成功！API 耗时: ${Date.now() - start}ms`;
+    } else {
+      resultEl.className = 'test-result error';
+      resultEl.innerText = `推送失败: ${res.error}`;
+    }
+  } catch (e) {
+    resultEl.className = 'test-result error';
+    resultEl.innerText = `推送异常: ${e.message}`;
+  }
+};
+
+// FlashDuty Test Notifier
+document.getElementById('btn-test-fd').onclick = async () => {
+  const resultEl = document.getElementById('test-fd-res');
+  resultEl.className = 'test-result';
+  resultEl.innerText = '正在发送 FlashDuty 测试电话告警...';
+  
+  const payload = {
+    webhookUrl: document.getElementById('cfg-fd-webhook').value.trim()
+  };
+  
+  try {
+    const start = Date.now();
+    const res = await apiFetch('/api/test-fd', {
       method: 'POST',
       body: JSON.stringify(payload)
     });

@@ -471,6 +471,30 @@
               </div>
 
               <div class="settings-section">
+                <h4>📞 FlashDuty 电话告警推送</h4>
+                <div class="settings-grid">
+                  <div class="form-group c-span-12">
+                    <label class="checkbox-container">
+                      <input type="checkbox" id="cfg-fd-enabled">
+                      <span class="checkmark"></span> 启用 FlashDuty 电话告警
+                    </label>
+                  </div>
+                  <div class="form-group c-span-6">
+                    <label>FlashDuty Webhook 地址</label>
+                    <input type="text" id="cfg-fd-webhook" placeholder="输入 FlashDuty 集成 Webhook 地址">
+                  </div>
+                  <div class="form-group c-span-6">
+                    <label>全局告警冷却时间 (秒，默认 300 即 5 分钟)</label>
+                    <input type="number" id="cfg-fd-cooldown" placeholder="例如: 300">
+                  </div>
+                  <div class="form-group c-span-12" style="display: flex; align-items: center; gap: 12px; margin-top: 8px;">
+                    <span id="test-fd-res" class="test-result" style="margin-top: 0; display: inline-block; margin-left: auto;"></span>
+                    <button type="button" id="btn-test-fd" class="btn btn-secondary">发送 FlashDuty 测试电话告警</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-section">
                 <h4>🔒 管理端端口与安全验证（修改后需重启）</h4>
                 <div class="settings-grid">
                   <div class="form-group c-span-4">

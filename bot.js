@@ -4,6 +4,7 @@ const axios = require('axios');
 const WebSocket = require('ws');
 const database = require('./database');
 const preheater = require('./preheater');
+const flashduty = require('./flashduty');
 
 // Logs buffer and state
 const logs = [];
@@ -1534,6 +1535,13 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
 
   log('INFO', `[${label}] 启动抢跑机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${hotkey}, 单轮并发数: ${burstCount}, 最大扫射轮数: ${retries}轮, 扫射间隔: ${interval}ms`);
 
+  flashduty.sendAlert(
+    `TAOLI 启动抢跑机制 - ${label}`,
+    `目标子网: SN#${netuid}\n目标 Hotkey: ${hotkey}\n策略: ${label}\n抢跑金额: ${amountTao} TAO`,
+    settings,
+    log
+  ).catch(() => {});
+
   const amountBigInt = BigInt(Math.floor(amountTao * 1e9));
   const txPromises = [];
 
@@ -1836,6 +1844,15 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     : Number(settings.dashingMaxPrice || 0);
 
   log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大价格限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
+
+  if (!isDoubleStaking) {
+    flashduty.sendAlert(
+      `TAOLI 启动极速打新抢购机制`,
+      `触发源: ${triggerSource}\n目标子网: SN#${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: 主线打新\n打新金额: ${settings.dashingAmount} TAO`,
+      settings,
+      log
+    ).catch(() => {});
+  }
   sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n最大价格限价: ${maxPriceLimit} TAO/Alpha\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
 
   try {
@@ -2548,6 +2565,7 @@ module.exports = {
   startBot,
   stopBot,
   testTelegram,
+  testFlashDuty: (webhookUrl) => flashduty.sendTestAlert(webhookUrl),
   testApiUrl,
   refreshAllWallets,
   reloadWallets,

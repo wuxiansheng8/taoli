@@ -233,6 +233,15 @@ app.post('/api/test-tg', requireAuth, async (req, res) => {
   res.json(result);
 });
 
+app.post('/api/test-fd', requireAuth, async (req, res) => {
+  const { webhookUrl } = req.body;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: 'FlashDuty Webhook 地址不能为空！' });
+  }
+  const result = await bot.testFlashDuty(webhookUrl);
+  res.json(result);
+});
+
 app.post('/api/test-node', requireAuth, async (req, res) => {
   const { url } = req.body;
   if (!url) {

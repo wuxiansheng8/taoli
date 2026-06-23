@@ -54,6 +54,11 @@ const DEFAULT_SETTINGS = {
   telegramToken: '',
   telegramChatId: '',
   
+  // FlashDuty settings
+  flashDutyEnabled: false,
+  flashDutyWebhookUrl: '',
+  flashDutyCooldownMs: 300000, // 默认 5 分钟
+  
   // Strategy: New Subnet Auto Register
   dashingEnabled: true,
   dashingAmount: 100, // TAO to register
