@@ -49,8 +49,10 @@ const DEFAULT_SETTINGS = {
   primaryNode: 'ws://127.0.0.1:9944',
   backupNode: 'wss://entrypoint-finney.opentensor.ai:443',
   mempoolPollIntervalMs: 100,
+  nonceSyncIntervalSeconds: 60,
   
   telegramEnabled: false,
+
   telegramToken: '',
   telegramChatId: '',
   

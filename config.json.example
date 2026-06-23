@@ -16,5 +16,6 @@
   "dashingIntervalMs": 1000,
   "dashingTimeoutMs": 30000,
   "renameEnabled": true,
-  "swapEnabled": true
+  "swapEnabled": true,
+  "nonceSyncIntervalSeconds": 60
 }

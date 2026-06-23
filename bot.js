@@ -5,6 +5,8 @@ const WebSocket = require('ws');
 const database = require('./database');
 const preheater = require('./preheater');
 const flashduty = require('./flashduty');
+const nonceSync = require('./nonceSync');
+
 
 // Logs buffer and state
 const logs = [];
@@ -2185,6 +2187,10 @@ function scheduleReconnect() {
 function disconnectForReconnect(reason) {
   log('WARN', `因 ${reason} 断开连接，准备自动重连...`);
 
+  // 停止后台 Nonce 同步定时器，防止重连期间报错
+  nonceSync.stopNonceSyncTimer();
+
+
   if (pollTimer) {
     clearTimeout(pollTimer);
     pollTimer = null;
@@ -2362,6 +2368,16 @@ async function connectWs(reason = 'Normal Boot') {
 
     log('SUCCESS', '[API初始化] 节点连接与全部初始化请求执行完毕！机器人正式进入 RUNNING 状态，已启动区块头 (subscribeNewHeads) 监听！');
 
+    // 启动独立的 Nonce 同步定时器，使用 Getter 动态获取 api 和 wallets
+    nonceSync.startNonceSyncTimer({
+      getApi: () => api,
+      getWallets: () => wallets,
+      nextNonceByAddress,
+      setNonceForwardOnly,
+      log
+    });
+
+
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
     api.rpc.chain.subscribeNewHeads(async (header) => {
       if (generation !== connectGeneration || botStatus === 'Stopped') return;
@@ -2465,6 +2481,10 @@ function startBot() {
 function stopBot() {
   botStatus = 'Stopped';
   log('INFO', '套利机器人正在关闭...');
+
+  // 停止后台 Nonce 同步定时器
+  nonceSync.stopNonceSyncTimer(log);
+
 
   preheater.stopPreheating();
 
