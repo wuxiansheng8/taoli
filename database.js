@@ -332,5 +332,6 @@ module.exports = {
   hashPassword,
   getCooldown,
   setCooldown,
-  clearCooldownsByStrategy
+  clearCooldownsByStrategy,
+  decrypt
 };

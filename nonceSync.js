@@ -1,4 +1,6 @@
 const database = require('./database');
+const privateWallet = require('./privateWallet');
+
 
 let nonceSyncTimer = null;
 let lastNonceSyncErrorTime = 0; // 用于限流错误日志（最多5分钟一条）
@@ -47,7 +49,9 @@ function startNonceSyncTimer({ getApi, getWallets, nextNonceByAddress, setNonceF
         // 仅在 Nonce 被推进（如外部发生了手动买卖或转账）时，复用原有 setNonceForwardOnly 进行安全同步，并打印一条且仅一条 INFO 日志
         if (currentNonce === undefined || isNaN(currentNonce) || nextNonce > currentNonce) {
           setNonceForwardOnly(w.pair.address, nextNonce);
-          log('INFO', `[Nonce同步] ♻️ 检测到钱包【${w.name}】链上 Nonce 发生外部变动，已将本地缓存从 ${currentNonce} 自动同步为最新: ${nextNonce}`);
+          if (!privateWallet.isPrivate(w)) {
+            log('INFO', `[Nonce同步] ♻️ 检测到钱包【${w.name}】链上 Nonce 发生外部变动，已将本地缓存从 ${currentNonce} 自动同步为最新: ${nextNonce}`);
+          }
         }
       }
     } catch (e) {

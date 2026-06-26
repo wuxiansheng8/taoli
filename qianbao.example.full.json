@@ -1,0 +1,9 @@
+[
+  {
+    "name": "MyPrivateWallet01",
+    "secret": "your mnemonic phrase or hex private key here",
+    "dashingAmount": 50.0,
+    "renameAmount": 20.0,
+    "swapAmount": 10.0
+  }
+]
