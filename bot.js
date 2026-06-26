@@ -1336,35 +1336,37 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
         const w = wallets.find(x => x.pair && x.pair.address === coldkey);
         if (w) {
-          const amountTao = (Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2);
-          log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
+          if (!privateWallet.isPrivate(w)) {
+            const amountTao = (Number(amountRao.toString().replace(/,/g, '')) / 1e9).toFixed(2);
+            log('SUCCESS', `[打新/抢跑成功] 我们的钱包【${w.name}】已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易成功在子网 #${netuid} 质押！金额: ${amountTao} TAO (Hotkey: ${hotkey})`);
 
-          let strategyLabel = '新子网打新';
-          const nowTime = Date.now();
-          for (const [key, ts] of seenActions.entries()) {
-            if (nowTime - ts < 5 * 60 * 1000) {
-              if (key.startsWith(`swap:${netuid}:`)) {
-                strategyLabel = '冷键交换抢跑';
-                break;
-              } else if (key.startsWith(`rename:${netuid}:`)) {
-                strategyLabel = '改名抢跑';
-                break;
+            let strategyLabel = '新子网打新';
+            const nowTime = Date.now();
+            for (const [key, ts] of seenActions.entries()) {
+              if (nowTime - ts < 5 * 60 * 1000) {
+                if (key.startsWith(`swap:${netuid}:`)) {
+                  strategyLabel = '冷键交换抢跑';
+                  break;
+                } else if (key.startsWith(`rename:${netuid}:`)) {
+                  strategyLabel = '改名抢跑';
+                  break;
+                }
               }
             }
-          }
 
-          sendTelegramAlert(
-            `🔔 <b>[${strategyLabel} 链上最终确认]</b>\n` +
-            `━━━━━━━━━━━━━━━━━━\n` +
-            `• <b>我方钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
-            `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
-            `• <b>最终质押</b>: <code>${amountTao} TAO</code>\n` +
-            `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
-            `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
-            `━━━━━━━━━━━━━━━━━━\n` +
-            `<i>🎉 资金已最终确认上链！</i>`
-          ).catch(() => {});
+            sendTelegramAlert(
+              `🔔 <b>[${strategyLabel} 链上最终确认]</b>\n` +
+              `━━━━━━━━━━━━━━━━━━\n` +
+              `• <b>我方钱包</b>: <code>${escapeHtml(w.name)}</code>\n` +
+              `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
+              `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+              `• <b>最终质押</b>: <code>${amountTao} TAO</code>\n` +
+              `• <b>目标子网</b>: <code>SN#${netuid}</code>\n` +
+              `• <b>目标Hotkey</b>: <code>${hotkey}</code>\n` +
+              `━━━━━━━━━━━━━━━━━━\n` +
+              `<i>🎉 资金已最终确认上链！</i>`
+            ).catch(() => {});
+          }
         }
       }
     });
@@ -1842,7 +1844,7 @@ async function executeTimeoutRetry(
 async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') {
   const settings = database.getSettings();
   const activeWallets = wallets.filter(w => w.enabled !== false);
-  const hasPublicWallet = activeWallets.some(w => !w.isPrivate);
+  const hasPublicWallet = privateWallet.hasPublic(activeWallets);
 
   if (activeWallets.length === 0) {
     if (hasPublicWallet) {
@@ -1903,7 +1905,9 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
 
   // 3. 内存成功状态校验：若之前已有该子网的成功购买记录，直接拦截退出，防止重复买入
   if (!isDoubleStaking && dashingSuccessByNetuid.get(successKey) === true) {
-    log('INFO', `[新子网打新] 检测到子网 #${netuid} (Hotkey: ${targetHotkey}) 已经打新成功，跳过执行。`);
+    if (hasPublicWallet) {
+      log('INFO', `[新子网打新] 检测到子网 #${netuid} (Hotkey: ${targetHotkey}) 已经打新成功，跳过执行。`);
+    }
     return;
   }
 
@@ -1916,7 +1920,9 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       hotkey: targetHotkey
     });
     if (!ok) {
-      log('WARN', `[新子网打新] 冷却状态写入失败: key = ${cooldownKey}`);
+      if (hasPublicWallet) {
+        log('WARN', `[新子网打新] 冷却状态写入失败: key = ${cooldownKey}`);
+      }
     }
   }
 
@@ -1942,23 +1948,27 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
     ? Number(settings.dashingDoubleMaxPrice || 0)
     : Number(settings.dashingMaxPrice || 0);
 
-  log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大价格限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
+  if (hasPublicWallet) {
+    log('INFO', `[新子网打新] [触发源: ${triggerSource}] 启动极速打新抢购机制 -> 目标子网 #${netuid}, 目标 Hotkey: ${targetHotkey}, 策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}, 滑点限制: ${(slippageLimit * 100).toFixed(2)}%, 最大价格限价: ${maxPriceLimit} TAO/Alpha, 最大扫射轮数: ${retries}, 扫射间隔: ${interval}ms`);
 
-  if (!isDoubleStaking) {
-    flashduty.sendAlert(
-      `TAOLI 启动极速打新抢购机制`,
-      `触发源: ${triggerSource}\n目标子网: SN#${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: 主线打新\n打新金额: ${settings.dashingAmount} TAO`,
-      settings,
-      log
-    ).catch(() => {});
+    if (!isDoubleStaking) {
+      flashduty.sendAlert(
+        `TAOLI 启动极速打新抢购机制`,
+        `触发源: ${triggerSource}\n目标子网: SN#${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: 主线打新\n打新金额: ${settings.dashingAmount} TAO`,
+        settings,
+        log
+      ).catch(() => {});
+    }
+    sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n最大价格限价: ${maxPriceLimit} TAO/Alpha\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
   }
-  sendTelegramAlert(`🚀 [新子网打新 极速启动]\n触发源: ${triggerSource}\n子网: #${netuid}\n目标 Hotkey: ${targetHotkey}\n策略通道: ${isDoubleStaking ? '二次延迟买入' : '主线打新'}\n滑点限制: ${(slippageLimit * 100).toFixed(2)}%\n最大价格限价: ${maxPriceLimit} TAO/Alpha\n单轮并发数: ${burstCount}\n最大扫射轮数: ${retries}轮\n扫射间隔: ${interval}ms`);
 
   try {
     for (let attempt = 0; attempt < retries; attempt++) {
       // 只有在尚未有任何一笔成功购买交易时，才进行新一轮的买入尝试
       if (attempt > 0 && dashingSuccessByNetuid.get(successKey)) {
-        log('INFO', `[新子网打新] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮扫射。`);
+        if (hasPublicWallet) {
+          log('INFO', `[新子网打新] 检测到已有并发购买交易成功上链，自动终止后续的第 ${attempt + 1}/${retries} 轮扫射。`);
+        }
         break;
       }
 
@@ -1972,16 +1982,22 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       if (maxPriceLimit > 0 && currentPrice !== null) {
         const priceInTao = Number(currentPrice) / 1e9;
         if (priceInTao > maxPriceLimit) {
-          log('WARN', `⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`);
-          sendTelegramAlert(`⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`).catch(() => {});
+          if (hasPublicWallet) {
+            log('WARN', `⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`);
+            sendTelegramAlert(`⚠️ [新子网打新] 价格保护触发：当前价格 ${priceInTao.toFixed(4)} TAO/Alpha 超过设定的最大价格 ${maxPriceLimit.toFixed(4)} TAO/Alpha，终止打新买入！`).catch(() => {});
+          }
           stoppedByPriceLimit = true;
           break; // 直接退出扫射循环
         }
       } else if (maxPriceLimit > 0 && currentPrice === null) {
-        log('WARN', `⚠️ [新子网打新] 无法获取当前子网 #${netuid} 价格！已跳过前置限价校验，将自动降级为普通市价质押（addStake）强行买入，以优先保证打新速度！`);
+        if (hasPublicWallet) {
+          log('WARN', `⚠️ [新子网打新] 无法获取当前子网 #${netuid} 价格！已跳过前置限价校验，将自动降级为普通市价质押（addStake）强行买入，以优先保证打新速度！`);
+        }
       }
 
-      log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
+      if (hasPublicWallet) {
+        log('INFO', `[新子网打新] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
+      }
 
       for (const w of activeWallets) {
         const wAmountTao = w.dashingAmount !== undefined ? w.dashingAmount : settings.dashingAmount;
@@ -1991,7 +2007,9 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
           try {
             // 透传 currentPrice 避免内部重复查价格，降低 RPC 交互延迟
             const tx = await buildStakeTx(targetHotkey, netuid, wAmountBigInt, slippageLimit, maxPriceLimit, currentPrice);
-            log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
+            if (!privateWallet.isPrivate(w)) {
+              log('INFO', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
+            }
 
             // 并发或重试时，每次都会调用 reserveNonce(address) 分配递增的新 nonce 供节点队列式打包
             const p = sendStrategicTx(tx, w.pair, settings.dashingTimeoutMs, {
@@ -1999,26 +2017,32 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
               hotkey: targetHotkey,
               amountBigInt: wAmountBigInt,
               slippageLimit: slippageLimit,
-              label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`
+              label: `新子网打新-轮次${attempt + 1}-并发#${i + 1}`,
+              isPrivate: privateWallet.isPrivate(w)
             }).then(res => {
               if (res.success) {
-                log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！交易哈希: ${res.hash}`);
+                if (!privateWallet.isPrivate(w)) {
+                  log('SUCCESS', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔购买成功！交易哈希: ${res.hash}`);
+                  sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${escapeHtml(w.name)}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
+                }
                 // 标记成功，用于终止其它重试轮次以及区块头触发的兜底机制
                 dashingSuccessByNetuid.set(successKey, true);
-
-                sendTelegramAlert(`✅ [新子网打新 成功]\n钱包: ${escapeHtml(w.name)}\n子网: #${netuid}\n轮次: ${attempt + 1}\n并发索引: ${i + 1}\n交易哈希: ${res.hash}`);
-                return res;
+                return { ...res, isPrivate: privateWallet.isPrivate(w) };
               } else {
-                log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
-                if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
-                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, wAmountTao, slippageLimit, maxPriceLimit, retryLabel);
+                if (!privateWallet.isPrivate(w)) {
+                  log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易失败: ${res.error}`);
                 }
-                return res;
+                if (res.error && (res.error.includes('timeout') || res.error.includes('Timeout')) && settings.dashingTimeoutRetries > 0) {
+                  return executeTimeoutRetry(w, netuid, targetHotkey, 1, settings.dashingTimeoutRetries, settings.dashingTimeoutMs, wAmountTao, slippageLimit, maxPriceLimit, retryLabel).then(retryRes => ({ ...retryRes, isPrivate: privateWallet.isPrivate(w) }));
+                }
+                return { ...res, isPrivate: privateWallet.isPrivate(w) };
               }
             });
             txPromises.push(p);
           } catch (e) {
-            log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易抛出异常: ${e.message}`);
+            if (!privateWallet.isPrivate(w)) {
+              log('ERROR', `[新子网打新] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1} 笔交易抛出异常: ${e.message}`);
+            }
           }
         }
       }
@@ -2039,13 +2063,25 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
         const anySuccess = dashingSuccessByNetuid.get(successKey);
         if (!anySuccess) {
           const errorMsgs = results
-            .map(r => r.status === 'fulfilled' ? r.value?.error : r.reason?.message)
+            .map(r => {
+              if (r.status === 'fulfilled') {
+                const val = r.value;
+                if (val && !val.isPrivate) {
+                  return val.error;
+                }
+              } else {
+                return r.reason?.message;
+              }
+              return null;
+            })
             .filter(Boolean);
           const uniqueErrors = [...new Set(errorMsgs)].slice(0, 3).join('; ');
 
-          const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: ${escapeHtml(uniqueErrors || '所有交易提交超时或未成功上链')}`;
-          log('ERROR', msg);
-          sendTelegramAlert(msg).catch(() => {});
+          if (hasPublicWallet) {
+            const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: ${escapeHtml(uniqueErrors || '所有交易提交超时或未成功上链')}`;
+            log('ERROR', msg);
+            sendTelegramAlert(msg).catch(() => {});
+          }
         }
       }).finally(unlock);
 
@@ -2056,12 +2092,16 @@ async function executeStakingSniping(netuid, hotkey, triggerSource = 'Unknown') 
       setTimeout(unlock, Math.max(3000, interval));
 
       if (stoppedByPriceLimit) {
-        const msg = `⚠️ [新子网打新 停止]\n子网: #${netuid}\n触发源: ${triggerSource}\n原因: 价格保护触发，已按配置停止买入`;
-        log('WARN', msg);
+        if (hasPublicWallet) {
+          const msg = `⚠️ [新子网打新 停止]\n子网: #${netuid}\n触发源: ${triggerSource}\n原因: 价格保护触发，已按配置停止买入`;
+          log('WARN', msg);
+        }
       } else {
-        const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
-        log('ERROR', msg);
-        sendTelegramAlert(msg).catch(() => {});
+        if (hasPublicWallet) {
+          const msg = `❌ [新子网打新 失败]\n子网: #${netuid}\n触发源: ${triggerSource}\n目标 Hotkey: ${targetHotkey}\n原因: 未能构建或发送任何交易`;
+          log('ERROR', msg);
+          sendTelegramAlert(msg).catch(() => {});
+        }
       }
     }
   }
@@ -2072,6 +2112,7 @@ function handleDoubleStaking(netuid, hotkey, source, detectedAt = null) {
   const settings = database.getSettings();
   const delaySec = Number(settings.dashingDoubleStakingDelay || 0);
   if (delaySec > 0) {
+    const hasPublic = privateWallet.hasPublic(wallets);
     // 🔒 安全保护：如果该子网的二次打新已在 24 小时冷却时间内，且超出了防抖窗口（> 10个区块），跳过任务登记。
     const cooldownKey = `new-subnet-double:${netuid}`;
     const cooldown = database.getCooldown(cooldownKey);
@@ -2079,27 +2120,39 @@ function handleDoubleStaking(netuid, hotkey, source, detectedAt = null) {
       const elapsed = Date.now() - cooldown.firstTriggeredAt;
       if (elapsed < 24 * 60 * 60 * 1000) {
         if (Math.abs(currentBlockHeight - cooldown.block) > 10) {
-          log('INFO', `[新子网打新] 检测到子网 #${netuid} 已有二次打新 24 小时冷却记录 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，跳过二次延时买入任务注册。`);
+          if (hasPublic) {
+            log('INFO', `[新子网打新] 检测到子网 #${netuid} 已有二次打新 24 小时冷却记录 (上次打新区块: #${cooldown.block}, 当前区块: #${currentBlockHeight})，跳过二次延时买入任务注册。`);
+          }
           return;
         }
       }
     }
 
     if (doubleStakingRegistered.has(netuid)) {
-      log('INFO', `[新子网打新] 子网 #${netuid} 的二次延时买入任务已在运行，忽略重复注册请求。`);
+      if (hasPublic) {
+        log('INFO', `[新子网打新] 子网 #${netuid} 的二次延时买入任务已在运行，忽略重复注册请求。`);
+      }
       return;
     }
     doubleStakingRegistered.add(netuid);
-    log('INFO', `[新子网打新] 已登记二次延时买入任务：将在 ${source}-startCall 触发 ${delaySec} 秒后再次执行买入。`);
+    if (hasPublic) {
+      log('INFO', `[新子网打新] 已登记二次延时买入任务：将在 ${source}-startCall 触发 ${delaySec} 秒后再次执行买入。`);
+    }
     setTimeout(() => {
       doubleStakingRegistered.delete(netuid); // 定时器触发后从内存中移除，允许后续轮次（如果有）重新注册
       if (botStatus !== 'Running') {
-        log('INFO', `[新子网打新] [二次延迟买入] 机器人未在运行状态，取消二次延迟交易。`);
+        if (hasPublic) {
+          log('INFO', `[新子网打新] [二次延迟买入] 机器人未在运行状态，取消二次延迟交易。`);
+        }
         return;
       }
-      log('INFO', `[新子网打新] [二次延迟买入] 延时 ${delaySec} 秒已到，开始发起二次打新交易！`);
+      if (hasPublic) {
+        log('INFO', `[新子网打新] [二次延迟买入] 延时 ${delaySec} 秒已到，开始发起二次打新交易！`);
+      }
       executeStakingSniping(netuid, hotkey, `DoubleStaking-${source}-Delay${delaySec}s`, detectedAt || Date.now()).catch(e => {
-        log('ERROR', `[新子网打新] [二次延迟买入] 执行二次抢购失败: ${e.message}`);
+        if (hasPublic) {
+          log('ERROR', `[新子网打新] [二次延迟买入] 执行二次抢购失败: ${e.message}`);
+        }
       });
     }, delaySec * 1000);
   }
