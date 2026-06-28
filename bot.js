@@ -1259,6 +1259,8 @@ async function detectEventsInBlock(blockHash, blockNumber) {
     await refreshSubnetOwnersCache();
   }
 
+  const now = Date.now();
+
   // 获取区块的所有事件并解析输出日志
   let allRecords = [];
   try {
@@ -1268,8 +1270,8 @@ async function detectEventsInBlock(blockHash, blockNumber) {
   }
 
   if (allRecords && allRecords.length > 0) {
-    allRecords.forEach(({ event, phase }) => {
-      if (!phase.isApplyExtrinsic) return;
+    for (const { event, phase } of allRecords) {
+      if (!phase.isApplyExtrinsic) continue;
       const extrinsicIndex = phase.asApplyExtrinsic.toNumber();
       const section = event.section;
       const method = event.method;
@@ -1309,21 +1311,48 @@ async function detectEventsInBlock(blockHash, blockNumber) {
 
       // 3. ColdkeySwapAnnounced (冷键交换声明成功)
       if (section === 'subtensorModule' && method === 'ColdkeySwapAnnounced') {
-        const coldkey = data.who || data[0];
-        const swapColdkeyHash = data.newColdkeyHash || data[1];
+        const coldkey = event.data[0]?.toString();
+        const swapColdkeyHash = event.data[1]?.toString();
 
-        if (isSubnetOwnerAddress(coldkey)) {
-          const logMsg = `[冷键交换] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkeyHash}！`;
+        if (settings.swapEnabled && isSubnetOwnerAddress(coldkey)) {
+          const logMsg = `[冷键交换声明成功] 钱包 ${coldkey} 已于区块 #${blockNumber} 第 ${extrinsicIndex} 笔交易正式发起冷键交换声明 -> ${swapColdkeyHash}！`;
           log('SUCCESS', logMsg);
-          sendTelegramAlert(
-            `🎉 <b>[冷键交换 链上发起成功]</b>\n` +
-            `━━━━━━━━━━━━━━━━━━\n` +
-            `• <b>声明钱包</b>: <code>${coldkey}</code>\n` +
-            `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
-            `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
-            `━━━━━━━━━━━━━━━━━━\n` +
-            `<i>🎉 冷键交换声明已由链正式确认！</i>`
-          ).catch(() => {});
+
+          const hasPublic = privateWallet.hasPublic(wallets);
+          if (hasPublic) {
+            sendTelegramAlert(
+              `🎉 <b>[冷键交换 链上发起成功]</b>\n` +
+              `━━━━━━━━━━━━━━━━━━\n` +
+              `• <b>声明钱包</b>: <code>${coldkey}</code>\n` +
+              `• <b>成交区块</b>: <code>#${blockNumber}</code>\n` +
+              `• <b>排队位置</b>: <code>第 ${extrinsicIndex} 笔交易</code>\n` +
+              `━━━━━━━━━━━━━━━━━━\n` +
+              `<i>🎉 冷键交换声明已由链正式确认！</i>`
+            ).catch(() => {});
+          }
+
+          const ownedNetuids = subnetOwnerNetuidsMap.get(coldkey) || [];
+          for (const netuid of ownedNetuids) {
+            const actionKey = `swap:${netuid}:${coldkey}`;
+            if (seenActions.has(actionKey)) continue;
+            seenActions.set(actionKey, now);
+
+            try {
+              const targetHotkey = await resolveHotkey(netuid);
+              if (targetHotkey) {
+                executeArbitrageStake(
+                  netuid,
+                  targetHotkey,
+                  settings.swapAmount,
+                  '冷键交换抢跑',
+                  settings.swapSlippageLimit,
+                  { oldColdkey: coldkey, detectedAt: now }
+                );
+              }
+            } catch (err) {
+              log('ERROR', `[冷键交换抢跑] 解析 hotkey 或执行抢跑异常 (子网 #${netuid}): ${err.message}`);
+            }
+          }
         }
       }
 
@@ -1369,14 +1398,13 @@ async function detectEventsInBlock(blockHash, blockNumber) {
           }
         }
       }
-    });
+    }
   }
 
   const block = await api.rpc.chain.getBlock(blockHash);
   const extrinsics = block?.block?.extrinsics;
   if (!extrinsics || extrinsics.length === 0) return;
 
-  const now = Date.now();
   for (let extIndex = 0; extIndex < extrinsics.length; extIndex++) {
     const ext = extrinsics[extIndex];
     if (!ext || !ext.method) continue;
@@ -1389,15 +1417,11 @@ async function detectEventsInBlock(blockHash, blockNumber) {
       /^subtensor(Module)?$/i.test(sec) &&
       /^(setSubnetIdentity|set_subnet_identity)$/i.test(meth);
 
-    const isSwap = settings.swapEnabled &&
-      /^subtensor(Module)?$/i.test(sec) &&
-      /^(announceColdkeySwap|announce_coldkey_swap)$/i.test(meth);
-
     const isStartCall = dashingActive &&
       /^subtensor(Module)?$/i.test(sec) &&
       /^(startCall|start_call)$/i.test(meth);
 
-    if (!isRename && !isSwap && !isStartCall) continue;
+    if (!isRename && !isStartCall) continue;
 
     try {
       const parsed = parseExtrinsic(ext);
@@ -1417,27 +1441,6 @@ async function detectEventsInBlock(blockHash, blockNumber) {
           isRegisterNetwork: false,
           handled: !!handled
         });
-      } else if (isSwap) {
-        const oldColdkey = parsed.signer;
-        if (isSubnetOwnerAddress(oldColdkey)) {
-          log('INFO', `[区块兜底] 在区块 #${blockNumber} 中补扫到漏掉的冷键交换声明交易 (Hash: ${parsed.txHash})`);
-          const handled = await handlePendingExtrinsic(parsed, 'Block-Fallback', blockNumber);
-          seenHashes.set(parsed.txHash, {
-            timestamp: now,
-            netuid: null,
-            tipTao: parsed.tipTao,
-            isRegisterNetwork: false,
-            handled: !!handled
-          });
-        } else {
-          seenHashes.set(parsed.txHash, {
-            timestamp: now,
-            netuid: null,
-            tipTao: parsed.tipTao,
-            isRegisterNetwork: false,
-            handled: true
-          });
-        }
       } else if (isStartCall) {
         const netuid = Number(parsed.args.netuid?.toString() || parsed.args[0]?.toString());
         if (Number.isFinite(netuid) && netuid > 0) {
