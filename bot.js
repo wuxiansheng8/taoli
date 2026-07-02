@@ -49,6 +49,9 @@ const subnetOwnerSet = new Set();
 const subnetOwnerNetuidsMap = new Map();
 const subnetHotkeysCache = new Map();
 const subnetRegisteredAtCache = new Map();
+let subnetPricesCache = new Map();
+let subnetPricesCacheUpdatedAt = 0;
+let priceRefreshInFlight = false;
 let successfulSyncCount = 0;
 
 // Multi-Node Broadcast State
@@ -257,6 +260,26 @@ async function refreshSubnetOwnersCache() {
     }
   } catch (e) {
     log('WARN', `[缓存同步] 自动同步子网 Owner 缓存失败: ${e.message}`);
+  }
+}
+
+async function refreshSubnetPricesCache() {
+  if (priceRefreshInFlight) return;
+  priceRefreshInFlight = true;
+  try {
+    if (api && api.rpc.swap && api.rpc.swap.currentAlphaPriceAll) {
+      const list = await api.rpc.swap.currentAlphaPriceAll();
+      const next = new Map();
+      for (const item of list) {
+        next.set(Number(item.netuid.toString()), BigInt(item.price.toString()));
+      }
+      subnetPricesCache = next;
+      subnetPricesCacheUpdatedAt = Date.now();
+    }
+  } catch (err) {
+    log('WARN', `⚠️ [价格缓存] 批量拉取子网价格失败: ${err.message || err}`);
+  } finally {
+    priceRefreshInFlight = false;
   }
 }
 
@@ -818,6 +841,16 @@ async function getNextPruneCandidate(currentBlock) {
 // Fetch current Alpha price in RAO from runtime APIs
 async function getSubnetPrice(netuid) {
   try {
+    const key = Number(netuid?.toNumber ? netuid.toNumber() : netuid?.toString ? netuid.toString() : netuid);
+    if (subnetPricesCache.has(key)) {
+      const age = Date.now() - subnetPricesCacheUpdatedAt;
+      if (age <= 60000) {
+        return subnetPricesCache.get(key);
+      } else {
+        log('WARN', `⚠️ [价格缓存] 价格缓存已过期 (更新于 ${Math.round(age / 1000)} 秒前)，已自动安全降级为在线 RPC 查询。`);
+      }
+    }
+
     if (api.rpc.swap && api.rpc.swap.currentAlphaPrice) {
       const price = await api.rpc.swap.currentAlphaPrice(netuid);
       if (price) return BigInt(price.toString());
@@ -1616,6 +1649,12 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
         log('INFO', `[${label}] 开始执行第 ${attempt + 1}/${retries} 轮扫射尝试...`);
       }
 
+      // 1. 在每轮扫射开始时集中只查一次价格，免去多个小号重复 RPC 价格查询
+      let currentPrice = null;
+      if (slippageLimit > 0) {
+        currentPrice = await getSubnetPrice(netuid);
+      }
+
       for (const w of activeWallets) {
         let wAmountTao = amountTao;
         if (label === '改名抢跑' && w.renameAmount !== undefined) {
@@ -1627,7 +1666,8 @@ async function executeArbitrageStake(netuid, hotkey, amountTao, label, slippageL
 
         for (let i = 0; i < burstCount; i++) {
           try {
-            const tx = await buildStakeTx(hotkey, netuid, wAmountBigInt, slippageLimit);
+            // 2. 传入 currentPrice 参数，避免在 buildStakeTx 内部二次 RPC 查价
+            const tx = await buildStakeTx(hotkey, netuid, wAmountBigInt, slippageLimit, 0, currentPrice);
             if (!privateWallet.isPrivate(w)) {
               log('INFO', `[${label}] 轮次 ${attempt + 1} - 钱包【${w.name}】并发第 ${i + 1}/${burstCount} 笔购买交易发起...`);
             }
@@ -2343,6 +2383,11 @@ function scheduleReconnect() {
 function disconnectForReconnect(reason) {
   log('WARN', `因 ${reason} 断开连接，准备自动重连...`);
 
+  // 清空价格缓存，重置锁状态
+  subnetPricesCache = new Map();
+  subnetPricesCacheUpdatedAt = 0;
+  priceRefreshInFlight = false;
+
   // 停止后台 Nonce 同步定时器，防止重连期间报错
   nonceSync.stopNonceSyncTimer();
 
@@ -2434,6 +2479,12 @@ async function connectWs(reason = 'Normal Boot') {
 
       api = await ApiPromise.create({
         provider,
+        types: {
+          SubnetPrice: {
+            netuid: 'u16',
+            price: 'u64'
+          }
+        },
         rpc: {
           swap: {
             currentAlphaPrice: {
@@ -2442,6 +2493,11 @@ async function connectWs(reason = 'Normal Boot') {
                 { name: 'netuid', type: 'u16' }
               ],
               type: 'u64'
+            },
+            currentAlphaPriceAll: {
+              description: 'Get current alpha price of all active subnets',
+              params: [],
+              type: 'Vec<SubnetPrice>'
             }
           }
         }
@@ -2504,6 +2560,10 @@ async function connectWs(reason = 'Normal Boot') {
     await refreshSubnetOwnersCache();
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
 
+    log('INFO', '[API初始化] 正在预热所有子网的价格缓存...');
+    await refreshSubnetPricesCache();
+    if (generation !== connectGeneration || botStatus === 'Stopped') return;
+
     log('INFO', '[API初始化] 正在配置多节点广播组件并启动节点延迟测试...');
     initBroadcastNodes();
     if (generation !== connectGeneration || botStatus === 'Stopped') return;
@@ -2540,6 +2600,7 @@ async function connectWs(reason = 'Normal Boot') {
       const blockNumber = header.number.toNumber();
       currentBlockHeight = blockNumber;
       cachedBlockHash = header.hash; // 更新区块 hash 缓存
+      refreshSubnetPricesCache().catch(() => {});
       if (global.blockCallback) {
         global.blockCallback(blockNumber);
       }
@@ -2637,6 +2698,11 @@ function startBot() {
 function stopBot() {
   botStatus = 'Stopped';
   log('INFO', '套利机器人正在关闭...');
+
+  // 清空价格缓存并重置锁
+  subnetPricesCache = new Map();
+  subnetPricesCacheUpdatedAt = 0;
+  priceRefreshInFlight = false;
 
   // 停止后台 Nonce 同步定时器
   nonceSync.stopNonceSyncTimer(log);

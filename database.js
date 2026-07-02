@@ -128,83 +128,120 @@ function decrypt(text) {
   }
 }
 
+// Settings, Wallets and Cooldowns Memory Caches
+let settingsCache = null;
+let walletsCache = null;
+let cooldownsCache = null;
+
+// Initialize cache from disk (called once synchronously when module is required)
+function initCache() {
+  // 1. Load settings
+  if (!fs.existsSync(SETTINGS_FILE)) {
+    settingsCache = { ...DEFAULT_SETTINGS };
+    saveSettings(DEFAULT_SETTINGS);
+  } else {
+    try {
+      const rawData = fs.readFileSync(SETTINGS_FILE, 'utf8');
+      const settings = JSON.parse(rawData);
+      delete settings.dashingMevShieldEnabled;
+      delete settings.renameMevShieldEnabled;
+      delete settings.swapMevShieldEnabled;
+      delete settings.sandwichEnabled;
+      delete settings.sandwichAmount;
+      delete settings.sandwichThreshold;
+      delete settings.sandwichTip;
+      delete settings.sandwichAutoSell;
+      delete settings.sandwichSellTip;
+      delete settings.sandwichSlippageLimit;
+      delete settings.sandwichTimeoutMs;
+      delete settings.dynamicSlippageEnabled;
+      delete settings.dynamicSlippageSafetyFactor;
+      delete settings.dashingTip;
+      delete settings.renameTip;
+      delete settings.swapTip;
+      delete settings.rateLimitPerSec;
+      settingsCache = { ...DEFAULT_SETTINGS, ...settings };
+    } catch (e) {
+      console.error('Error reading settings file, using defaults:', e);
+      settingsCache = { ...DEFAULT_SETTINGS };
+    }
+  }
+
+  // 2. Load wallets
+  if (!fs.existsSync(WALLETS_FILE)) {
+    walletsCache = [];
+    saveWallets([]);
+  } else {
+    try {
+      const rawData = fs.readFileSync(WALLETS_FILE, 'utf8');
+      walletsCache = JSON.parse(rawData);
+    } catch (e) {
+      console.error('Error reading wallets file:', e);
+      walletsCache = [];
+    }
+  }
+
+  // 3. Load cooldowns
+  if (!fs.existsSync(COOLDOWNS_FILE)) {
+    cooldownsCache = {};
+  } else {
+    try {
+      const rawData = fs.readFileSync(COOLDOWNS_FILE, 'utf8');
+      cooldownsCache = JSON.parse(rawData);
+    } catch (e) {
+      console.error('Error reading cooldowns:', e);
+      cooldownsCache = {};
+    }
+  }
+}
+
+// Automatically trigger initial caching
+initCache();
+
 // Settings management
 function getSettings() {
-  if (!fs.existsSync(SETTINGS_FILE)) {
-    saveSettings(DEFAULT_SETTINGS);
-    return DEFAULT_SETTINGS;
-  }
-  try {
-    const rawData = fs.readFileSync(SETTINGS_FILE, 'utf8');
-    const settings = JSON.parse(rawData);
-    // 主动剔除历史配置文件里的旧 MEV 属性，让其自动退场
-    delete settings.dashingMevShieldEnabled;
-    delete settings.renameMevShieldEnabled;
-    delete settings.swapMevShieldEnabled;
-    delete settings.sandwichEnabled;
-    delete settings.sandwichAmount;
-    delete settings.sandwichThreshold;
-    delete settings.sandwichTip;
-    delete settings.sandwichAutoSell;
-    delete settings.sandwichSellTip;
-    delete settings.sandwichSlippageLimit;
-    delete settings.sandwichTimeoutMs;
-    delete settings.dynamicSlippageEnabled;
-    delete settings.dynamicSlippageSafetyFactor;
-    delete settings.dashingTip;
-    delete settings.renameTip;
-    delete settings.swapTip;
-    delete settings.rateLimitPerSec;
-    return { ...DEFAULT_SETTINGS, ...settings };
-  } catch (e) {
-    console.error('Error reading settings file, using defaults:', e);
-    return DEFAULT_SETTINGS;
-  }
+  if (!settingsCache) initCache();
+  return { ...settingsCache }; // Return shallow copy to prevent pollution
 }
 
 function saveSettings(settings) {
   try {
-    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf8');
+    settingsCache = { ...DEFAULT_SETTINGS, ...settings };
+    // Asynchronous disk write
+    fs.promises.writeFile(SETTINGS_FILE, JSON.stringify(settingsCache, null, 2), 'utf8')
+      .catch(e => console.error('Error async writing settings:', e));
     return true;
   } catch (e) {
-    console.error('Error writing settings file:', e);
+    console.error('Error writing settings memory:', e);
     return false;
   }
 }
 
 // Wallets management
 function getWallets(shouldDecrypt = false) {
-  if (!fs.existsSync(WALLETS_FILE)) {
-    saveWallets([]);
-    return [];
-  }
-  try {
-    const rawData = fs.readFileSync(WALLETS_FILE, 'utf8');
-    const wallets = JSON.parse(rawData);
-    
-    return wallets.map(wallet => {
-      const w = { ...wallet };
-      if (shouldDecrypt && w.secretEncrypted) {
-        w.secret = decrypt(w.secretEncrypted);
-      }
-      // Never send encrypted key directly to UI with secret
-      if (!shouldDecrypt) {
-        delete w.secretEncrypted;
-      }
-      return w;
-    });
-  } catch (e) {
-    console.error('Error reading wallets file:', e);
-    return [];
-  }
+  if (!walletsCache) initCache();
+  return walletsCache.map(wallet => {
+    const w = { ...wallet };
+    if (shouldDecrypt && w.secretEncrypted) {
+      w.secret = decrypt(w.secretEncrypted);
+    }
+    // Never send encrypted key directly to UI with secret
+    if (!shouldDecrypt) {
+      delete w.secretEncrypted;
+    }
+    return w;
+  });
 }
 
 function saveWallets(wallets) {
   try {
-    fs.writeFileSync(WALLETS_FILE, JSON.stringify(wallets, null, 2), 'utf8');
+    walletsCache = wallets;
+    // Asynchronous disk write
+    fs.promises.writeFile(WALLETS_FILE, JSON.stringify(walletsCache, null, 2), 'utf8')
+      .catch(e => console.error('Error async writing wallets:', e));
     return true;
   } catch (e) {
-    console.error('Error writing wallets file:', e);
+    console.error('Error writing wallets memory:', e);
     return false;
   }
 }
@@ -260,23 +297,14 @@ function deleteWallet(name) {
 }
 
 function getCooldown(key) {
-  try {
-    if (!fs.existsSync(COOLDOWNS_FILE)) return null;
-    const cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
-    return cooldowns[key] || null;
-  } catch (e) {
-    console.error('Error reading cooldowns:', e);
-    return null;
-  }
+  if (!cooldownsCache) initCache();
+  return cooldownsCache[key] || null;
 }
 
 function setCooldown(key, data) {
   try {
-    let cooldowns = {};
-    if (fs.existsSync(COOLDOWNS_FILE)) {
-      cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
-    }
-    cooldowns[key] = {
+    if (!cooldownsCache) initCache();
+    cooldownsCache[key] = {
       ...data,
       firstTriggeredAt: Date.now()
     };
@@ -284,41 +312,44 @@ function setCooldown(key, data) {
     // Clean up expired cooldowns (older than 24 hours)
     const now = Date.now();
     const expiry = 24 * 60 * 60 * 1000;
-    for (const k in cooldowns) {
-      if (!cooldowns[k] || !cooldowns[k].firstTriggeredAt || now - cooldowns[k].firstTriggeredAt > expiry) {
-        delete cooldowns[k];
+    for (const k in cooldownsCache) {
+      if (!cooldownsCache[k] || !cooldownsCache[k].firstTriggeredAt || now - cooldownsCache[k].firstTriggeredAt > expiry) {
+        delete cooldownsCache[k];
       }
     }
     
-    fs.writeFileSync(COOLDOWNS_FILE, JSON.stringify(cooldowns, null, 2), 'utf8');
+    // Asynchronous disk write
+    fs.promises.writeFile(COOLDOWNS_FILE, JSON.stringify(cooldownsCache, null, 2), 'utf8')
+      .catch(e => console.error('Error async writing cooldowns:', e));
     return true;
   } catch (e) {
-    console.error('Error writing cooldowns:', e);
+    console.error('Error writing cooldowns memory:', e);
     return false;
   }
 }
 
 function clearCooldownsByStrategy(strategyPrefix) {
   try {
-    if (!fs.existsSync(COOLDOWNS_FILE)) return 0;
-    const cooldowns = JSON.parse(fs.readFileSync(COOLDOWNS_FILE, 'utf8'));
+    if (!cooldownsCache) initCache();
     let clearedCount = 0;
     
-    for (const key in cooldowns) {
+    for (const key in cooldownsCache) {
       if (
         (strategyPrefix === 'new-subnet' && (key.startsWith('new-subnet:') || key.startsWith('new-subnet-double:'))) ||
         (strategyPrefix === 'rename' && key.startsWith('rename:')) ||
         (strategyPrefix === 'coldkey-swap' && key.startsWith('coldkey-swap:'))
       ) {
-        delete cooldowns[key];
+        delete cooldownsCache[key];
         clearedCount++;
       }
     }
     
-    fs.writeFileSync(COOLDOWNS_FILE, JSON.stringify(cooldowns, null, 2), 'utf8');
+    // Asynchronous disk write
+    fs.promises.writeFile(COOLDOWNS_FILE, JSON.stringify(cooldownsCache, null, 2), 'utf8')
+      .catch(e => console.error('Error clearing cooldowns memory:', e));
     return clearedCount;
   } catch (e) {
-    console.error('Error clearing cooldowns:', e);
+    console.error('Error clearing cooldowns memory:', e);
     return 0;
   }
 }
